@@ -1751,8 +1751,6 @@ dependencies = [
 [[package]]
 name = "lightning_encoding_derive"
 version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c81810acde5616571d62928ccebef1e92b941d245e0d3cc830f884ec827c5ca6"
 dependencies = [
  "amplify_syn",
  "encoding_derive_helpers 0.9.0",

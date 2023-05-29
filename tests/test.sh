@@ -11,7 +11,7 @@ prog=$(realpath "$(dirname "$0")")
 name=$(basename "$0")
 bad_net_msg="incorrect network; available networks: testnet, regtest"
 
-BITCOIN_CLI="docker compose exec -u blits bitcoind bitcoin-cli -regtest"
+BITCOIN_CLI="sudo docker-compose exec -u blits bitcoind bitcoin-cli -regtest"
 NETWORK="regtest"
 TMUX_CMD="tmux -L rgb-tmux"
 export BITCOIN_CLI NETWORK TMUX_CMD
@@ -48,14 +48,14 @@ _start_services() {
     mkdir -p data{rgb0,rgb1,rgb2,core,index,ldk0,ldk1,ldk2}
     case $NETWORK in
         regtest)
-            docker compose --profile=regtest up -d
+            docker-compose --profile=regtest up -d --no-build
             echo
             echo "preparing bitcoind wallet"
             $BITCOIN_CLI createwallet miner >/dev/null
             $BITCOIN_CLI -rpcwallet=miner -generate 103 >/dev/null
             ;;
         testnet)
-            docker compose up -d
+            docker-compose up -d
             ;;
         *)
             _die "$bad_net_msg"
@@ -80,7 +80,7 @@ _start_tmux() {
 }
 
 _stop_services() {
-    docker compose down --remove-orphans
+    docker-compose down --remove-orphans
     rm -rf data{rgb0,rgb1,rgb2,core,index,ldk0,ldk1,ldk2}
 }
 

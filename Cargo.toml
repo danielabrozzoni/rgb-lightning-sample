@@ -58,6 +58,7 @@ lightning-background-processor = { path = "./rust-lightning/lightning-background
 rgb20 = { path = "./rust-rgb20" }
 rgb_core = { package = "rgb-core", path = "./rgb-core" }
 rgb_rpc = { path = "./rgb-node/rpc" }
+lightning_encoding_derive = { path = "../lightning_encoding/derive" }
 
 [profile.release]
 panic = "abort"
