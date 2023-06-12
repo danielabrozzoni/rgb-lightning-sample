@@ -45,7 +45,7 @@ use lightning::ln::channelmanager::{
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
 use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::onion_message::SimpleArcOnionMessenger;
-use lightning::rgb_utils::{get_rgb_channel_info, RgbUtxo, RgbUtxos};
+use lightning::rgb_utils::{get_rgb_channel_info, is_channel_rgb, RgbUtxo, RgbUtxos, RgbInfo};
 use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
 use lightning::routing::router::DefaultRouter;
@@ -158,6 +158,13 @@ async fn handle_ldk_events(
 			output_script,
 			..
 		} => {
+			struct RgbState {
+				rgb_change_amount: u64,
+				channel_rgb_amount: u64,
+				rgb_inputs: Vec<OutPoint>,
+				rgb_info: RgbInfo,
+			}
+
 			let addr = WitnessProgram::from_scriptpubkey(
 				&output_script[..],
 				match network {
@@ -172,30 +179,43 @@ async fn handle_ldk_events(
 			let script = Script::from_byte_iter(addr.clone().into_iter().map(|b| Ok(b)))
 				.expect("valid script");
 
-			let (rgb_info, _) =
-				get_rgb_channel_info(temporary_channel_id, &PathBuf::from(&ldk_data_dir.clone()));
-			let channel_rgb_amount: u64 = rgb_info.local_rgb_amount;
-			let asset_owned_values = get_asset_owned_values(
-				rgb_info.contract_id,
-				rgb_node_client.clone(),
-				wallet_arc.clone(),
-				electrum_url.clone(),
-			)
-			.expect("known contract");
-			let mut rgb_inputs: Vec<OutPoint> = vec![];
-			let mut input_amount: u64 = 0;
-			for owned_value in asset_owned_values {
-				if input_amount >= channel_rgb_amount {
-					break;
+			let ldk_data_dir = PathBuf::from(&ldk_data_dir);
+			let is_colored = is_channel_rgb(temporary_channel_id, &ldk_data_dir);
+			let rgb_state = if is_colored {
+				let (rgb_info, _) =
+					get_rgb_channel_info(temporary_channel_id, &ldk_data_dir);
+				let channel_rgb_amount: u64 = rgb_info.local_rgb_amount;
+				let asset_owned_values = get_asset_owned_values(
+					rgb_info.contract_id,
+					rgb_node_client.clone(),
+					wallet_arc.clone(),
+					electrum_url.clone(),
+				)
+				.expect("known contract");
+				let mut rgb_inputs: Vec<OutPoint> = vec![];
+				let mut input_amount: u64 = 0;
+				for owned_value in asset_owned_values {
+					if input_amount >= channel_rgb_amount {
+						break;
+					}
+					let outpoint =
+						OutPoint { txid: owned_value.seal.txid, vout: owned_value.seal.vout };
+					rgb_inputs.push(outpoint);
+					input_amount += owned_value.state.value
 				}
-				let outpoint =
-					OutPoint { txid: owned_value.seal.txid, vout: owned_value.seal.vout };
-				rgb_inputs.push(outpoint);
-				input_amount += owned_value.state.value
-			}
-			let rgb_change_amount = input_amount - channel_rgb_amount;
+				let rgb_change_amount = input_amount - channel_rgb_amount;
 
-			let rgb_utxos_path = format!("{}/rgb_utxos", ldk_data_dir);
+				Some (RgbState {
+					channel_rgb_amount,
+					rgb_change_amount,
+					rgb_inputs,
+					rgb_info,
+				})
+			} else {
+				None
+			};
+
+			let rgb_utxos_path = format!("{}/rgb_utxos", ldk_data_dir.display());
 			let serialized_utxos =
 				fs::read_to_string(&rgb_utxos_path).expect("able to read rgb utxos file");
 			let mut rgb_utxos: RgbUtxos =
@@ -203,90 +223,101 @@ async fn handle_ldk_events(
 			let unspendable_utxos: Vec<OutPoint> = rgb_utxos
 				.utxos
 				.iter()
-				.filter(|u| !rgb_inputs.contains(&u.outpoint))
+				.filter(|u| {
+					rgb_state.as_ref().map(|state| !state.rgb_inputs.contains(&u.outpoint)).unwrap_or(true)
+				})
 				.map(|u| u.outpoint)
 				.collect();
 			let wallet = wallet_arc.lock().unwrap();
 			let mut builder = wallet.build_tx();
+			if let Some(rgb_state) = &rgb_state {
+				builder.add_utxos(&rgb_state.rgb_inputs).expect("valid utxos");
+			}
 			builder
-				.add_utxos(&rgb_inputs)
-				.expect("valid utxos")
 				.unspendable(unspendable_utxos)
 				.fee_rate(FeeRate::from_sat_per_vb(FEE_RATE))
 				.ordering(bdk::wallet::tx_builder::TxOrdering::Untouched)
 				.add_recipient(script, *channel_value_satoshis);
-			let mut beneficiaries: EndpointValueMap = bmap![
-				SealEndpoint::WitnessVout {
-					method: CloseMethod::OpretFirst,
-					vout: 0,
-					blinding: 777,
-				} => channel_rgb_amount
-			];
-			if rgb_change_amount > 0 {
-				beneficiaries.insert(
-					SealEndpoint::WitnessVout {
-						method: CloseMethod::OpretFirst,
-						vout: 1,
-						blinding: 777,
-					},
-					rgb_change_amount,
-				);
-			}
 			let psbt = builder.finish().expect("valid psbt finish").0;
-			let input_outpoints_bt: BTreeSet<OutPoint> = rgb_inputs.clone().into_iter().collect();
-			let mut rgb_client = rgb_node_client.lock().unwrap();
-			let (mut psbt, consignment) = rgb_client.send_rgb(
-				rgb_info.contract_id,
-				psbt,
-				input_outpoints_bt,
-				beneficiaries,
-				vec![],
-			);
+
+			let (mut psbt, state_and_consignment) = match rgb_state {
+				Some(rgb_state) => {
+					let mut beneficiaries: EndpointValueMap = bmap![
+						SealEndpoint::WitnessVout {
+							method: CloseMethod::OpretFirst,
+							vout: 0,
+							blinding: 777,
+						} => rgb_state.channel_rgb_amount
+					];
+					if rgb_state.rgb_change_amount > 0 {
+						beneficiaries.insert(
+							SealEndpoint::WitnessVout {
+								method: CloseMethod::OpretFirst,
+								vout: 1,
+								blinding: 777,
+							},
+							rgb_state.rgb_change_amount,
+						);
+					}
+					let input_outpoints_bt: BTreeSet<OutPoint> = rgb_state.rgb_inputs.clone().into_iter().collect();
+					let mut rgb_client = rgb_node_client.lock().unwrap();
+					let (psbt, consignment) = rgb_client.send_rgb(
+						rgb_state.rgb_info.contract_id,
+						psbt,
+						input_outpoints_bt,
+						beneficiaries,
+						vec![],
+					);
+					(psbt, Some((rgb_state, consignment)))
+				},
+				None => { (psbt, None) }
+			};
 
 			// Sign the final funding transaction
 			wallet.sign(&mut psbt, SignOptions::default()).expect("able to sign");
 			let funding_tx = psbt.extract_tx();
 			let funding_txid = funding_tx.txid();
 
-			let consignment_path = format!("{}/consignment_{funding_txid}", ldk_data_dir);
-			consignment.strict_file_save(consignment_path.clone()).expect("consignment save ok");
+			if let Some((rgb_state, consignment)) = state_and_consignment {
+				let consignment_path = format!("{}/consignment_{funding_txid}", ldk_data_dir.display());
+				consignment.strict_file_save(consignment_path.clone()).expect("consignment save ok");
 
-			if rgb_change_amount > 0 {
-				let rgb_change_utxo =
-					RgbUtxo { outpoint: OutPoint { txid: funding_txid, vout: 2 }, colored: true };
-				rgb_utxos.utxos.push(rgb_change_utxo);
-				let serialized_utxos = serde_json::to_string(&rgb_utxos).expect("valid rgb utxos");
-				fs::write(rgb_utxos_path, serialized_utxos).expect("able to write rgb utxos file");
+				if rgb_state.rgb_change_amount > 0 {
+					let rgb_change_utxo =
+						RgbUtxo { outpoint: OutPoint { txid: funding_txid, vout: 2 }, colored: true };
+					rgb_utxos.utxos.push(rgb_change_utxo);
+					let serialized_utxos = serde_json::to_string(&rgb_utxos).expect("valid rgb utxos");
+					fs::write(rgb_utxos_path, serialized_utxos).expect("able to write rgb utxos file");
 
-				let funding_consignment_path =
-					format!("{}/consignment_{}", ldk_data_dir, hex::encode(&temporary_channel_id));
-				consignment
-					.strict_file_save(funding_consignment_path.clone())
-					.expect("consignment save ok");
+					let funding_consignment_path =
+						format!("{}/consignment_{}", ldk_data_dir.display(), hex::encode(&temporary_channel_id));
+					consignment
+						.strict_file_save(funding_consignment_path.clone())
+						.expect("consignment save ok");
+				}
+
+				let proxy_ref = (*proxy_client).clone();
+				let res = proxy_ref.post_consignment(
+					proxy_url,
+					funding_txid.to_string(),
+					consignment_path.into(),
+				);
+				if res.is_err() || res.unwrap().result.is_none() {
+					println!("ERROR: unable to post consignment");
+					return;
+				}
+
+				let reveal = Reveal {
+					blinding_factor: 777,
+					outpoint: OutPoint { txid: funding_txid, vout: 0 },
+					close_method: CloseMethod::OpretFirst,
+					witness_vout: true,
+				};
+				let mut rgb_client = rgb_node_client.lock().unwrap();
+				let _status = rgb_client
+					.consume_transfer(consignment, true, Some(reveal), |_| ())
+					.expect("valid consume tranfer");
 			}
-
-			let proxy_ref = (*proxy_client).clone();
-			let res = proxy_ref.post_consignment(
-				proxy_url,
-				funding_txid.to_string(),
-				consignment_path.into(),
-			);
-			if res.is_err() || res.unwrap().result.is_none() {
-				println!("ERROR: unable to post consignment");
-				return;
-			}
-
-			let reveal = Reveal {
-				blinding_factor: 777,
-				outpoint: OutPoint { txid: funding_txid, vout: 0 },
-				close_method: CloseMethod::OpretFirst,
-				witness_vout: true,
-			};
-			let _status = rgb_client
-				.consume_transfer(consignment, true, Some(reveal), |_| ())
-				.expect("valid consume tranfer");
-
-			drop(rgb_client);
 
 			// Give the funding transaction back to LDK for opening the channel.
 			if channel_manager

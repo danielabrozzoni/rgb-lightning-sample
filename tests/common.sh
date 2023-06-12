@@ -118,6 +118,11 @@ fund_address() {
     mine 1
 }
 
+sync_wallet() {
+    local num="$1"
+    $TMUX_CMD send-keys -t node$num "syncwallet" C-m
+}
+
 create_utxos() {
     local num get_funds
     num="$1"
@@ -202,7 +207,7 @@ refresh() {
     sleep 1
 }
 
-open_channel() {
+open_colored_channel() {
     local src_num dst_num dst_port dst_id rgb_amt
     src_num="$1"
     dst_num="$2"
@@ -210,13 +215,13 @@ open_channel() {
     dst_id="$4"
     rgb_amt="$5"
     _tit "open channel from node $src_num to node $dst_num with $rgb_amt assets"
-    $TMUX_CMD send-keys -t node$src_num "openchannel $dst_id@127.0.0.1:$dst_port 999666 546000 $asset_id $rgb_amt --public" C-m
+    $TMUX_CMD send-keys -t node$src_num "opencoloredchannel $dst_id@127.0.0.1:$dst_port 999666 546000 $asset_id $rgb_amt --public" C-m
     check $src_num
-    _wait_for_text_multi $T_5 node$src_num "openchannel" "HANDLED ACCEPT CHANNEL"
+    _wait_for_text_multi $T_5 node$src_num "opencoloredchannel" "HANDLED ACCEPT CHANNEL"
     timestamp
-    _wait_for_text_multi $T_5 node$src_num "openchannel" "FUNDING COMPLETED"
+    _wait_for_text_multi $T_5 node$src_num "opencoloredchannel" "FUNDING COMPLETED"
     timestamp
-    _wait_for_text_multi $T_5 node$src_num "openchannel" "HANDLED FUNDING SIGNED"
+    _wait_for_text_multi $T_5 node$src_num "opencoloredchannel" "HANDLED FUNDING SIGNED"
     timestamp
     check $dst_num
     _wait_for_text $T_5 node$dst_num "HANDLED OPEN CHANNEL"
@@ -226,7 +231,7 @@ open_channel() {
 
     mine 6
     check $src_num
-    _wait_for_text_multi $T_10 node$src_num "mine" "EVENT: Channel .* with peer .* is ready to be used"
+    _wait_for_text_multi $T_10 node$src_num "EVENT: Channel .* with peer .* is ready to be used"
     timestamp
     _wait_for_text_multi $T_5 node$src_num "EVENT: Channel .* with peer .* is ready to be used" "HANDLED CHANNEL UPDATE"
     timestamp
@@ -243,6 +248,49 @@ open_channel() {
         | head -1 | grep -Eo '[0-9a-f]{64}')
     _out "channel ID: $channel_id"
 }
+
+open_vanilla_channel() {
+    local src_num dst_num dst_port dst_id msat_amount
+    src_num="$1"
+    dst_num="$2"
+    dst_port="$3"
+    dst_id="$4"
+    msat_amount="$5"
+    _tit "open channel from node $src_num to node $dst_num of $msat_amount mSAT"
+    $TMUX_CMD send-keys -t node$src_num "openchannel $dst_id@127.0.0.1:$dst_port $msat_amount 546000 --public" C-m
+    check $src_num
+    _wait_for_text_multi $T_5 node$src_num "openchannel" "HANDLED ACCEPT CHANNEL"
+    timestamp
+    _wait_for_text_multi $T_5 node$src_num "openchannel" "FUNDING COMPLETED"
+    timestamp
+    _wait_for_text_multi $T_5 node$src_num "openchannel" "HANDLED FUNDING SIGNED"
+    timestamp
+    check $dst_num
+    _wait_for_text $T_5 node$dst_num "HANDLED OPEN CHANNEL"
+    timestamp
+    _wait_for_text_multi $T_5 node$dst_num "HANDLED OPEN CHANNEL" "HANDLED FUNDING CREATED"
+    timestamp
+
+    mine 6
+    # check $src_num
+    # _wait_for_text_multi $T_10 node$src_num "EVENT: Channel .* with peer .* is ready to be used"
+    # timestamp
+    # _wait_for_text_multi $T_5 node$src_num "EVENT: Channel .* with peer .* is ready to be used" "HANDLED CHANNEL UPDATE"
+    # timestamp
+    # check $dst_num
+    # _wait_for_text $T_5 node$dst_num "EVENT: Channel .* with peer .* is ready to be used"
+    # timestamp
+    # _wait_for_text_multi $T_5 node$dst_num "EVENT: Channel .* with peer .* is ready to be used" "HANDLED CHANNEL UPDATE"
+    # timestamp
+    sleep 3
+
+    $TMUX_CMD send-keys -t node$src_num "listchannels" C-m
+    sleep 1
+    channel_id=$(_wait_for_text 5 node$src_num "[^_]channel_id:" \
+        | head -1 | grep -Eo '[0-9a-f]{64}')
+    _out "channel ID: $channel_id"
+}
+
 
 list_channels() {
     local node_num chan_num lines text matches
@@ -369,13 +417,31 @@ keysend() {
     timestamp
 }
 
-get_invoice() {
+get_colored_invoice() {
     local num rgb_amt text pattern
     num="$1"
     rgb_amt="$2"
 
     _tit "get invoice for $rgb_amt assets from node $num"
-    $TMUX_CMD send-keys -t node$num "getinvoice 3000000 900 $asset_id $rgb_amt" C-m
+    $TMUX_CMD send-keys -t node$num "getcoloredinvoice 3000000 900 $asset_id $rgb_amt" C-m
+    timestamp
+    check $num
+    pattern="SUCCESS: generated invoice: "
+    text="$(_wait_for_text_multi $T_5 node$num \
+        'getcoloredinvoice' "$pattern" 3 \
+        | sed "s/$pattern//" |grep -Eo '^[0-9a-z]+$')"
+    timestamp
+    invoice="$(echo $text | sed -E 's/[\n ]//g')"
+    _out "invoice: $invoice"
+}
+
+get_vanilla_invoice() {
+    local num msat_amount text pattern
+    num="$1"
+    msat_amount="$2"
+
+    _tit "get invoice for $msat_amount mSATs from node $num"
+    $TMUX_CMD send-keys -t node$num "getinvoice $msat_amount 900" C-m
     timestamp
     check $num
     pattern="SUCCESS: generated invoice: "

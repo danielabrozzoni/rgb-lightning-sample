@@ -14,12 +14,12 @@ create_utxos 3
 issue_asset
 
 # open channel
-open_channel 1 2 "$NODE2_PORT" "$node2_id" 600
+open_colored_channel 1 2 "$NODE2_PORT" "$node2_id" 600
 list_channels 1
 list_channels 2
 
 # get invoice
-get_invoice 2 100
+get_colored_invoice 2 100
 
 # send payment
 send_payment 1 2 "$invoice"

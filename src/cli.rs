@@ -620,20 +620,39 @@ pub(crate) async fn poll_for_user_input(
 
 					println!("Refresh complete");
 				}
-				"openchannel" => {
+				"openchannel" | "opencoloredchannel" => {
+					let is_colored = word == "opencoloredchannel";
 					let peer_pubkey_and_ip_addr = words.next();
 					let channel_value_sat = words.next();
 					let push_value_msat = words.next();
-					let contract_id = words.next();
-					let channel_value_rgb = words.next();
-					if peer_pubkey_and_ip_addr.is_none()
+					let (contract_id, channel_value_rgb) = if is_colored {
+						(words.next(), words.next())
+					} else {
+						(None, None)
+					};
+					let announce_channel = match words.next() {
+						Some("--public") | Some("--public=true") => true,
+						Some("--public=false") => false,
+						Some(_) => {
+							println!("ERROR: invalid `--public` command format. Valid formats: `--public`, `--public=true` `--public=false`");
+							continue;
+						}
+						None => false,
+					};
+					if is_colored && (peer_pubkey_and_ip_addr.is_none()
 						|| channel_value_sat.is_none()
 						|| push_value_msat.is_none()
-						|| contract_id.is_none() || channel_value_rgb.is_none()
+						|| contract_id.is_none() || channel_value_rgb.is_none())
 					{
-						println!("ERROR: openchannel has 5 required arguments: `openchannel pubkey@host:port chan_amt_satoshis push_amt_msatoshis rgb_contract_id chan_amt_rgb` [--public]");
+						println!("ERROR: opencoloredchannel has 5 required arguments: `openchannel pubkey@host:port chan_amt_satoshis push_amt_msatoshis rgb_contract_id chan_amt_rgb` [--public]");
+						continue;
+					} else if peer_pubkey_and_ip_addr.is_none()
+						|| channel_value_sat.is_none()
+						|| push_value_msat.is_none() {
+						println!("ERROR: openchannel has 3 required arguments: `openchannel pubkey@host:port chan_amt_satoshis push_amt_msatoshis` [--public]");
 						continue;
 					}
+
 					let peer_pubkey_and_ip_addr = peer_pubkey_and_ip_addr.unwrap();
 					let (pubkey, peer_addr) =
 						match parse_peer_info(peer_pubkey_and_ip_addr.to_string()) {
@@ -679,53 +698,53 @@ pub(crate) async fn poll_for_user_input(
 						continue;
 					}
 
-					let contract_id = ContractId::from_str(contract_id.unwrap());
-					if contract_id.is_err() {
-						println!("ERROR: contract_id must be a valid RGB asset ID");
-						continue;
-					}
-					let contract_id = contract_id.unwrap();
-
-					let chan_amt_rgb: Result<u64, _> = channel_value_rgb.unwrap().parse();
-					if chan_amt_rgb.is_err() {
-						println!("ERROR: channel RGB amount must be a number");
-						continue;
-					}
-					let chan_amt_rgb = chan_amt_rgb.unwrap();
-
-					let total_rgb_amount = match get_rgb_total_amount(
-						contract_id,
-						rgb_node_client.clone(),
-						wallet_arc.clone(),
-						electrum_url.clone(),
-					) {
-						Ok(a) => a,
-						Err(e) => {
-							println!("{e}");
+					let rgb_info = if !is_colored {
+						None
+					} else {
+						let contract_id = ContractId::from_str(contract_id.unwrap());
+						if contract_id.is_err() {
+							println!("ERROR: contract_id must be a valid RGB asset ID");
 							continue;
 						}
-					};
+						let contract_id = contract_id.unwrap();
 
-					if chan_amt_rgb > total_rgb_amount {
-						println!("ERROR: do not have enough RGB assets");
-						continue;
-					}
+						let chan_amt_rgb: Result<u64, _> = channel_value_rgb.unwrap().parse();
+    					if chan_amt_rgb.is_err() {
+    						println!("ERROR: channel RGB amount must be a number");
+    						continue;
+    					}
+						let chan_amt_rgb = chan_amt_rgb.unwrap();
+
+						let total_rgb_amount = match get_rgb_total_amount(
+							contract_id,
+							rgb_node_client.clone(),
+							wallet_arc.clone(),
+							electrum_url.clone(),
+						) {
+							Ok(a) => a,
+							Err(e) => {
+								println!("{e}");
+								continue;
+							}
+						};
+
+						if chan_amt_rgb > total_rgb_amount {
+    						println!("ERROR: do not have enough RGB assets");
+    						continue;
+    					}
+
+						Some(RgbInfo {
+							contract_id,
+							local_rgb_amount: chan_amt_rgb,
+							remote_rgb_amount: 0,
+						})
+					};
 
 					if connect_peer_if_necessary(pubkey, peer_addr, peer_manager.clone())
 						.await
 						.is_err()
 					{
 						continue;
-					};
-
-					let announce_channel = match words.next() {
-						Some("--public") | Some("--public=true") => true,
-						Some("--public=false") => false,
-						Some(_) => {
-							println!("ERROR: invalid `--public` command format. Valid formats: `--public`, `--public=true` `--public=false`");
-							continue;
-						}
-						None => false,
 					};
 
 					let open_channel_result = open_channel(
@@ -735,26 +754,24 @@ pub(crate) async fn poll_for_user_input(
 						announce_channel,
 						channel_manager.clone(),
 						proxy_url,
+						is_colored,
 					);
-					if open_channel_result.is_err() {
-						continue;
-					}
+					let temporary_channel_id = match open_channel_result {
+						Err(_) => continue,
+						Ok(v) => v,
+					};
 
-					let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir.clone());
+					let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir);
 					let _ = disk::persist_channel_peer(
 						Path::new(&peer_data_path),
 						peer_pubkey_and_ip_addr,
 					);
 
-					let temporary_channel_id = open_channel_result.unwrap();
-					let channel_rgb_info_path =
-						format!("{}/{}", ldk_data_dir.clone(), hex::encode(&temporary_channel_id));
-					let rgb_info = RgbInfo {
-						contract_id,
-						local_rgb_amount: chan_amt_rgb,
-						remote_rgb_amount: 0,
-					};
-					write_rgb_channel_info(&PathBuf::from(&channel_rgb_info_path), &rgb_info);
+					if let Some(rgb_info) = rgb_info {
+						let channel_rgb_info_path =
+							format!("{}/{}", ldk_data_dir.clone(), hex::encode(&temporary_channel_id));
+						write_rgb_channel_info(&PathBuf::from(&channel_rgb_info_path), &rgb_info);
+					}
 				}
 				"sendpayment" => {
 					let invoice_str = words.next();
@@ -860,7 +877,8 @@ pub(crate) async fn poll_for_user_input(
 						PathBuf::from(&ldk_data_dir),
 					);
 				}
-				"getinvoice" => {
+				"getinvoice" | "getcoloredinvoice" => {
+					let is_colored = word == "getcoloredinvoice";
 					let getinvoice_cmd =
 						"`getinvoice <amt_msats> <expiry_secs> <rgb_contract_id> <amt_rgb>`";
 					let amt_str = words.next();
@@ -868,12 +886,15 @@ pub(crate) async fn poll_for_user_input(
 					let contract_id_str = words.next();
 					let amt_rgb_str = words.next();
 
-					if amt_str.is_none()
+					if is_colored && (amt_str.is_none()
 						|| expiry_secs_str.is_none()
 						|| contract_id_str.is_none()
-						|| amt_rgb_str.is_none()
+						|| amt_rgb_str.is_none())
 					{
-						println!("ERROR: getinvoice has 4 required arguments: {getinvoice_cmd}");
+						println!("ERROR: getcoloredinvoice has 4 required arguments: {getinvoice_cmd}");
+						continue;
+					} else if !is_colored && (amt_str.is_none() || expiry_secs_str.is_none()){
+						println!("ERROR: getinvoice has 2 required arguments: getinvoice <amt_msats> <expiry_secs>");
 						continue;
 					}
 
@@ -894,21 +915,27 @@ pub(crate) async fn poll_for_user_input(
 						continue;
 					}
 
-					let contract_id_str = contract_id_str.unwrap();
-					let contract_id = match ContractId::from_str(contract_id_str) {
-						Ok(cid) => cid,
-						Err(_) => {
-							println!("ERROR: invalid contract ID: {contract_id_str}");
-							continue;
-						}
-					};
+					let (contract_id, amt_rgb) = if is_colored {
+    					let contract_id_str = contract_id_str.unwrap();
+    					let contract_id = match ContractId::from_str(contract_id_str) {
+    						Ok(cid) => cid,
+    						Err(_) => {
+    							println!("ERROR: invalid contract ID: {contract_id_str}");
+    							continue;
+    						}
+    					};
 
-					let amt_rgb: u64 = match amt_rgb_str.unwrap().parse() {
-						Ok(amt) => amt,
-						Err(e) => {
-							println!("ERROR: couldn't parse amt_rgb: {e}");
-							continue;
-						}
+    					let amt_rgb: u64 = match amt_rgb_str.unwrap().parse() {
+    						Ok(amt) => amt,
+    						Err(e) => {
+    							println!("ERROR: couldn't parse amt_rgb: {e}");
+    							continue;
+    						}
+    					};
+
+						(Some(contract_id), Some(amt_rgb))
+					} else {
+						(None, None)
 					};
 
 					get_invoice(
@@ -1157,7 +1184,8 @@ fn help() {
 	println!("  help\tShows a list of commands.");
 	println!("  quit\tClose the application.");
 	println!("\n  Channels:");
-	println!("      openchannel pubkey@host:port <chan_amt_satoshis> <push_amt_msatoshis> <rgb_contract_id> <chan_amt_rgb> [--public]");
+	println!("      opencoloredchannel pubkey@host:port <chan_amt_satoshis> <push_amt_msatoshis> <rgb_contract_id> <chan_amt_rgb> [--public]");
+	println!("      openchannel pubkey@host:port <chan_amt_satoshis> <push_amt_msatoshis> [--public]");
 	println!("      closechannel <channel_id> <peer_pubkey>");
 	println!("      forceclosechannel <channel_id> <peer_pubkey>");
 	println!("      listchannels");
@@ -1170,7 +1198,8 @@ fn help() {
 	println!("      keysend <dest_pubkey> <amt_msats> <rgb_contract_id> <amt_rgb>");
 	println!("      listpayments");
 	println!("\n  Invoices:");
-	println!("      getinvoice <amt_msats> <expiry_secs> <rgb_contract_id> <amt_rgb>");
+	println!("      getcoloredinvoice <amt_msats> <expiry_secs> <rgb_contract_id> <amt_rgb>");
+	println!("      getinvoice <amt_msats> <expiry_secs>");
 	println!("      invoicestatus <invoice>");
 	println!("\n  Onchain:");
 	println!("      getaddress");
@@ -1399,7 +1428,7 @@ fn do_disconnect_peer(
 
 fn open_channel(
 	peer_pubkey: PublicKey, channel_amt_sat: u64, push_amt_msat: u64, announced_channel: bool,
-	channel_manager: Arc<ChannelManager>, proxy_url: &str,
+	channel_manager: Arc<ChannelManager>, proxy_url: &str, is_colored: bool,
 ) -> Result<[u8; 32], ()> {
 	let config = UserConfig {
 		channel_handshake_limits: ChannelHandshakeLimits {
@@ -1415,8 +1444,12 @@ fn open_channel(
 		..Default::default()
 	};
 
-	let consignment_endpoint =
-		ConsignmentEndpoint::from_str(&format!("rgbhttpjsonrpc:{}", proxy_url)).unwrap();
+	let consignment_endpoint = if is_colored {
+		Some(ConsignmentEndpoint::from_str(&format!("rgbhttpjsonrpc:{}", proxy_url)).unwrap())
+	} else {
+		None
+	};
+		
 	match channel_manager.create_channel(
 		peer_pubkey,
 		channel_amt_sat,
@@ -1441,12 +1474,14 @@ fn send_payment(
 	ldk_data_dir: PathBuf,
 ) {
 	let payment_hash = PaymentHash(invoice.payment_hash().clone().into_inner());
-	write_rgb_payment_info_file(
-		&ldk_data_dir,
-		&payment_hash,
-		invoice.rgb_contract_id().unwrap(),
-		invoice.rgb_amount().unwrap(),
-	);
+	if let Some(contract_id) = invoice.rgb_contract_id() {
+		write_rgb_payment_info_file(
+			&ldk_data_dir,
+			&payment_hash,
+			contract_id,
+			invoice.rgb_amount().unwrap(),
+		);
+	}
 	let status =
 		match pay_invoice(invoice, Retry::Timeout(Duration::from_secs(10)), channel_manager) {
 			Ok(_payment_id) => {
@@ -1522,7 +1557,7 @@ fn keysend<E: EntropySource>(
 fn get_invoice(
 	amt_msat: u64, payment_storage: PaymentInfoStorage, channel_manager: &ChannelManager,
 	keys_manager: Arc<KeysManager>, network: Network, expiry_secs: u32,
-	logger: Arc<disk::FilesystemLogger>, contract_id: ContractId, amt_rgb: u64,
+	logger: Arc<disk::FilesystemLogger>, contract_id: Option<ContractId>, amt_rgb: Option<u64>,
 ) {
 	let mut payments = payment_storage.lock().unwrap();
 	let currency = match network {
@@ -1540,8 +1575,8 @@ fn get_invoice(
 		"ldk-tutorial-node".to_string(),
 		expiry_secs,
 		None,
-		Some(contract_id),
-		Some(amt_rgb),
+		contract_id,
+		amt_rgb,
 	) {
 		Ok(inv) => {
 			println!("SUCCESS: generated invoice: {}", inv);
