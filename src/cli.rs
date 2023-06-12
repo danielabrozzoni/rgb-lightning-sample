@@ -1175,6 +1175,7 @@ fn help() {
 	println!("\n  Onchain:");
 	println!("      getaddress");
 	println!("      listunspent");
+	println!("      syncwallet");
 	println!("\n  RGB:");
 	println!("      createutxos");
 	println!("      issueasset <supply> <ticker> <name> <precision>");
