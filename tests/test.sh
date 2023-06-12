@@ -11,7 +11,7 @@ prog=$(realpath "$(dirname "$0")")
 name=$(basename "$0")
 bad_net_msg="incorrect network; available networks: testnet, regtest"
 
-BITCOIN_CLI="sudo docker-compose exec -u blits bitcoind bitcoin-cli -regtest"
+BITCOIN_CLI="podman-compose exec -u blits bitcoind bitcoin-cli -regtest"
 NETWORK="regtest"
 TMUX_CMD="tmux -L rgb-tmux"
 export BITCOIN_CLI NETWORK TMUX_CMD
@@ -48,14 +48,14 @@ _start_services() {
     mkdir -p data{rgb0,rgb1,rgb2,core,index,ldk0,ldk1,ldk2}
     case $NETWORK in
         regtest)
-            docker-compose --profile=regtest up -d --no-build
+            podman-compose up -d
             echo
             echo "preparing bitcoind wallet"
             $BITCOIN_CLI createwallet miner >/dev/null
             $BITCOIN_CLI -rpcwallet=miner -generate 103 >/dev/null
             ;;
         testnet)
-            docker-compose up -d
+            podman-compose up -d
             ;;
         *)
             _die "$bad_net_msg"
@@ -68,11 +68,11 @@ _start_tmux() {
 
     echo "starting tmux"
     $TMUX_CMD -f tests/tmux.conf new-session -d -n node1 -s rgb-lightning-sample -x 200 -y 100
-    $TMUX_CMD send-keys 'target/debug/ldk-sample user:password@localhost:18443 dataldk0/ 63963 9735 regtest' C-m
+    $TMUX_CMD send-keys 'target/debug/ldk-sample user:password@127.0.0.1:18443 dataldk0/ 63963 9735 regtest' C-m
     $TMUX_CMD new-window -n node2
-    $TMUX_CMD send-keys 'target/debug/ldk-sample user:password@localhost:18443 dataldk1/ 63964 9736 regtest' C-m
+    $TMUX_CMD send-keys 'target/debug/ldk-sample user:password@127.0.0.1:18443 dataldk1/ 63964 9736 regtest' C-m
     $TMUX_CMD new-window -n node3
-    $TMUX_CMD send-keys 'target/debug/ldk-sample user:password@localhost:18443 dataldk2/ 63965 9737 regtest' C-m
+    $TMUX_CMD send-keys 'target/debug/ldk-sample user:password@127.0.0.1:18443 dataldk2/ 63965 9737 regtest' C-m
     sleep 1
 
     echo
@@ -80,7 +80,7 @@ _start_tmux() {
 }
 
 _stop_services() {
-    docker-compose down --remove-orphans
+    podman-compose down --remove-orphans
     rm -rf data{rgb0,rgb1,rgb2,core,index,ldk0,ldk1,ldk2}
 }
 
