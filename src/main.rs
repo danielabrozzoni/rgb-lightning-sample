@@ -49,6 +49,7 @@ use lightning::rgb_utils::{get_rgb_channel_info, is_channel_rgb, RgbUtxo, RgbUtx
 use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
 use lightning::routing::router::DefaultRouter;
+use lightning::routing::scoring::ProbabilisticScorerUsingTime;
 use lightning::util::config::UserConfig;
 use lightning::util::events::{Event, PaymentPurpose};
 use lightning::util::ser::ReadableArgs;
@@ -134,6 +135,10 @@ pub(crate) type PeerManager = SimpleArcPeerManager<
 	BitcoindClient,
 	FilesystemLogger,
 >;
+
+pub(crate) type Scorer = ProbabilisticScorerUsingTime<Arc<NetworkGraph>, Arc<FilesystemLogger>, std::time::Instant>;
+
+pub(crate) type Router = DefaultRouter<Arc<NetworkGraph>, Arc<FilesystemLogger>, Arc<Mutex<Scorer>>>;
 
 pub(crate) type ChannelManager =
 	SimpleArcChannelManager<ChainMonitor, BitcoindClient, BitcoindClient, FilesystemLogger>;
@@ -962,7 +967,7 @@ async fn start_ldk() {
 				fee_estimator.clone(),
 				chain_monitor.clone(),
 				broadcaster.clone(),
-				router,
+				router.clone(),
 				logger.clone(),
 				user_config,
 				channel_monitor_mut_references,
@@ -981,7 +986,7 @@ async fn start_ldk() {
 				fee_estimator.clone(),
 				chain_monitor.clone(),
 				broadcaster.clone(),
-				router,
+				router.clone(),
 				logger.clone(),
 				keys_manager.clone(),
 				keys_manager.clone(),
@@ -1238,6 +1243,7 @@ async fn start_ldk() {
 		Arc::clone(&keys_manager),
 		Arc::clone(&network_graph),
 		Arc::clone(&onion_messenger),
+		Arc::clone(&router),
 		inbound_payments,
 		outbound_payments,
 		ldk_data_dir.clone(),

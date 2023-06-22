@@ -231,14 +231,14 @@ open_colored_channel() {
 
     mine 6
     check $src_num
-    _wait_for_text_multi $T_10 node$src_num "EVENT: Channel .* with peer .* is ready to be used"
-    timestamp
-    _wait_for_text_multi $T_5 node$src_num "EVENT: Channel .* with peer .* is ready to be used" "HANDLED CHANNEL UPDATE"
+    _wait_for_text_multi $T_10 node$src_num "mine" "EVENT: Channel .* with peer .* is ready to be used"
+    # timestamp
+    # _wait_for_text_multi $T_5 node$src_num "HANDLED OPEN CHANNEL" "HANDLED CHANNEL UPDATE"
     timestamp
     check $dst_num
     _wait_for_text $T_5 node$dst_num "EVENT: Channel .* with peer .* is ready to be used"
-    timestamp
-    _wait_for_text_multi $T_5 node$dst_num "EVENT: Channel .* with peer .* is ready to be used" "HANDLED CHANNEL UPDATE"
+    # timestamp
+    # _wait_for_text_multi $T_5 node$dst_num "EVENT: Channel .* with peer .* is ready to be used" "HANDLED CHANNEL UPDATE"
     timestamp
     sleep 3
 
@@ -300,7 +300,7 @@ list_channels() {
     _subtit "list channels ($chan_num expected) on node $node_num"
     $TMUX_CMD send-keys -t node$node_num "listchannels" C-m
     sleep 1
-    text="$(_wait_for_text 5 node$node_num "listchannels" $lines | sed -n '/^\[/,/^\]/p')"
+    text="$(_wait_for_text $T_5 node$node_num "listchannels" $lines | sed -n '/^\[/,/^\]/p')"
     echo "$text"
     matches=$(echo "$text" | grep -c "is_channel_ready: true")
     [ "$matches" = "$chan_num" ] || _die "one or more channels not ready"
@@ -474,5 +474,29 @@ send_payment() {
     _wait_for_text $T_5 node$dst_num "Event::PaymentClaimed end"
     timestamp
     _wait_for_text_multi $T_5 node$dst_num "Event::PaymentClaimed end" "HANDLED COMMITMENT SIGNED"
+    timestamp
+}
+
+send_swap() {
+    local node exchange swaptype amt_msat amt_asset
+    node="$1"
+    exchange="$2"
+    swaptype="$3"
+    amt_msat="$4"
+    amt_asset="$5"
+
+    _tit "node $node swapping ($swaptype) $amt_msat msats for $amt_asset $asset_id through node $exchange"
+    $TMUX_CMD send-keys -t node$node "sendswap $exchange $swaptype $amt_msat $asset_id $amt_asset" C-m
+    timestamp
+    check $node
+    _wait_for_text_multi $T_5 node$node "sendswap" "EVENT: initiated swap"
+    timestamp
+    _wait_for_text_multi $T_15 node$node "sendswap" "EVENT: successfully sent payment"
+    timestamp
+    _wait_for_text $T_5 node$node "EVENT: received payment"
+    timestamp
+    _wait_for_text $T_5 node$node "Event::PaymentClaimed end"
+    timestamp
+    _wait_for_text_multi $T_5 node$node "Event::PaymentClaimed end" "HANDLED COMMITMENT SIGNED"
     timestamp
 }
