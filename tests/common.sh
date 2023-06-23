@@ -142,9 +142,9 @@ create_utxos() {
 
 get_node_ids() {
     _tit "get node IDs"
-    node1_id=$(_wait_for_text 1 node1 "Local Node ID is" |awk '{print $NF}')
-    node2_id=$(_wait_for_text 1 node2 "Local Node ID is" |awk '{print $NF}')
-    node3_id=$(_wait_for_text 1 node3 "Local Node ID is" |awk '{print $NF}')
+    node1_id=$(_wait_for_text 5 node1 "Local Node ID is" |awk '{print $NF}')
+    node2_id=$(_wait_for_text 5 node2 "Local Node ID is" |awk '{print $NF}')
+    node3_id=$(_wait_for_text 5 node3 "Local Node ID is" |awk '{print $NF}')
     _out "node 1 ID: $node1_id"
     _out "node 2 ID: $node2_id"
     _out "node 3 ID: $node3_id"
@@ -499,4 +499,52 @@ send_swap() {
     timestamp
     _wait_for_text_multi $T_5 node$node "Event::PaymentClaimed end" "HANDLED COMMITMENT SIGNED"
     timestamp
+}
+
+maker_init() {
+    local node amount asset side price
+    node="$1"
+    amount="$2"
+    side="$3"
+    price="$4"
+
+    _tit "node $node initializating trade (mm-side): swapping ($side) $amount of $asset_id at $price msats/asset"
+    timestamp
+    $TMUX_CMD send-keys -t node$node "makerinit $amount $asset_id $side $price" C-m
+    swap_string=$(_wait_for_text 5 node$node "SUCCESS! swap_string =" |awk '{print $NF}')
+    payment_secret=$(_wait_for_text 5 node$node "payment_secret: " |awk '{print $NF}')
+    _out "swap_string: $swap_string"
+    _out "payment_secret: $payment_secret"
+    sleep 1
+}
+
+taker() {
+    local node
+    node="$1"
+
+    _tit "node $node taking the trade $swap_string"
+    $TMUX_CMD send-keys -t node$node "taker $swap_string" C-m
+    taker_pk=$(_wait_for_text 5 node$node "our_pk: " |awk '{print $NF}')
+    _out "taker_pk: $taker_pk"
+    sleep 1
+}
+
+maker_execute() {
+    local node
+    node="$1"
+
+    _tit "node $node completing the trade..."
+    $TMUX_CMD send-keys -t node$node "makerexecute $swap_string $payment_secret $taker_pk" C-m
+    timestamp
+    _wait_for_text_multi $T_5 node$node "makerexecute" "EVENT: initiated swap"
+    timestamp
+    _wait_for_text_multi $T_15 node$node "makerexecute" "EVENT: successfully sent payment"
+    timestamp
+    _wait_for_text $T_5 node$node "EVENT: received payment"
+    timestamp
+    _wait_for_text $T_5 node$node "Event::PaymentClaimed end"
+    timestamp
+    _wait_for_text_multi $T_5 node$node "Event::PaymentClaimed end" "HANDLED COMMITMENT SIGNED"
+    timestamp
+
 }

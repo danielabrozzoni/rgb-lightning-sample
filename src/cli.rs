@@ -9,6 +9,8 @@ use crate::rgb_utils::get_asset_owned_values;
 use crate::rgb_utils::get_rgb_total_amount;
 use crate::rgb_utils::RgbUtilities;
 use crate::seal::Revealed;
+use crate::swap::SwapString;
+use crate::swap::SwapType;
 use crate::{
 	ChannelManager, HTLCStatus, MillisatAmount, NetworkGraph, OnionMessenger, PaymentInfo,
 	PaymentInfoStorage, PeerManager, Router,
@@ -26,6 +28,7 @@ use bp::seals::txout::ExplicitSeal;
 use bp::seals::txout::{blind::ConcealedSeal, CloseMethod};
 use invoice::ConsignmentEndpoint;
 use lightning::chain::keysinterface::{EntropySource, KeysManager};
+use lightning::ln::PaymentSecret;
 use lightning::ln::channelmanager::{PaymentId, Retry};
 use lightning::ln::msgs::NetAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};
@@ -35,7 +38,7 @@ use lightning::rgb_utils::{
 	get_rgb_channel_info, write_rgb_channel_info, RgbInfo, RgbUtxo, RgbUtxos,
 };
 use lightning::routing::gossip::NodeId;
-use lightning::routing::router::{Router as RouterTrait, Route, DEFAULT_MAX_TOTAL_CLTV_EXPIRY_DELTA, DEFAULT_MAX_PATH_COUNT};
+use lightning::routing::router::{Router as RouterTrait, Route, DEFAULT_MAX_TOTAL_CLTV_EXPIRY_DELTA};
 use lightning::routing::router::{PaymentParameters, RouteParameters};
 use lightning::util::config::{ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
 use lightning::util::ser::{Writeable, Writer};
@@ -52,7 +55,8 @@ use rgb_rpc::Client;
 use rgb_rpc::ContractValidity;
 use rgb_rpc::Reveal;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::convert::TryInto;
 use std::env;
 use std::fs;
 use std::io;
@@ -129,6 +133,7 @@ pub(crate) async fn poll_for_user_input(
 	logger: Arc<disk::FilesystemLogger>, bitcoind_client: Arc<BitcoindClient>,
 	rgb_node_client: Arc<Mutex<Client>>, proxy_client: Arc<RestClient>, proxy_url: &str,
 	wallet_arc: Arc<Mutex<Wallet<SqliteDatabase>>>, electrum_url: String,
+	whitelisted_trades: Arc<Mutex<HashMap<PaymentHash, (ContractId, SwapType)>>>,
 ) {
 	println!(
 		"LDK startup successful. Enter \"help\" to view available commands. Press Ctrl-D to quit."
@@ -1089,6 +1094,117 @@ pub(crate) async fn poll_for_user_input(
 
 					send_swap(&channel_manager, &router, exchange, swaptype, asset_id.unwrap(), outbound_payments.clone(), PathBuf::from(&ldk_data_dir));
 				}
+				"makerinit" => {
+					let amt_asset = words.next();
+					let asset_id = words.next();
+					let swaptype = words.next();
+					let price = words.next();
+
+					if price.is_none() {
+						println!("ERROR: makerinit requires 4 args: makerinit <amount> <asset_id> <buy|sell> <price_msats_per_asset>");
+						continue;
+					}
+
+					let asset_id = match ContractId::from_str(asset_id.unwrap()) {
+    						Ok(cid) => Some(cid),
+    						Err(_) => {
+    							println!("ERROR: invalid contract ID: {}", asset_id.unwrap());
+    							continue;
+    						}
+						};
+					let price = price.unwrap().parse::<u64>();
+					if price.is_err() {
+						println!("ERROR: invalid price_msats_per_asset");
+						continue;
+					}
+					let price = price.unwrap();
+					let amt_asset = amt_asset.unwrap().parse::<u64>();
+					if amt_asset.is_err() {
+						println!("ERROR: invalid amt_asset");
+						continue;
+					}
+					let amt_asset = amt_asset.unwrap();
+					let swaptype = match swaptype {
+						Some("buy") => SwapType::BuyAsset {
+							amount_rgb: amt_asset,
+							amount_msats: amt_asset * price,
+						},
+						Some("sell") => SwapType::SellAsset {
+							amount_rgb: amt_asset,
+							amount_msats: amt_asset * price,
+						},
+						_ => {
+							println!("ERROR: invalid swap type, use either `buy` or `sell`");
+							continue;
+						}
+					};
+
+					let (payment_hash, payment_secret) = maker_init(&channel_manager, &swaptype);
+					let swapstring = format!("{}:{}:{}:{}:{}", amt_asset, asset_id.unwrap(), swaptype.side(), price, hex_utils::hex_str(&payment_hash.0));
+					println!("SUCCESS! swap_string = {}", swapstring);
+
+					let payment_secret = hex_utils::hex_str(&payment_secret.0);
+					println!("payment_secret: {}", payment_secret);
+					println!("To execute the swap run `makerexecute {} {} <peer_pubkey>`", swapstring, payment_secret);
+				}
+				"taker" => {
+					let swapstring = words.next();
+
+					if swapstring.is_none() {
+						println!("ERROR: taker requires 1 arg: taker <swap_string>");
+						continue;
+					}
+
+					let swapstring = match SwapString::from_str(swapstring.unwrap()) {
+						Ok(v) => v,
+						Err(e) => {
+							println!("ERROR: {}", e);
+							continue;
+						}
+					};
+
+					whitelisted_trades.lock().unwrap().insert(swapstring.payment_hash, (swapstring.asset_id, swapstring.swap_type));
+					println!("SUCCESS: Trade whitelisted!");
+					println!("our_pk: {}", channel_manager.get_our_node_id());
+				}
+				"makerexecute" => {
+					let swapstring = words.next();
+					let payment_secret = words.next();
+					let peer_pubkey = words.next();
+
+					if peer_pubkey.is_none() {
+						println!("ERROR: makerexecute requires 3 args: makerexecute <swap_string> <payment_secret> <peer_pubkey>");
+						continue;
+					}
+
+					let swapstring = match SwapString::from_str(swapstring.unwrap()) {
+						Ok(v) => v,
+						Err(e) => {
+							println!("ERROR: {}", e);
+							continue;
+						}
+					};
+					let payment_secret = hex_utils::to_vec(payment_secret.unwrap())
+						.and_then(|vec| vec.try_into().ok())
+						.map(|slice| PaymentSecret(slice));
+					let payment_secret = match payment_secret {
+						Some(v) => v,
+						_ => {
+							println!("ERROR: invalid payment hash");
+							continue;
+						}
+					};
+					let peer_pubkey =
+						match bitcoin::secp256k1::PublicKey::from_str(peer_pubkey.unwrap()) {
+							Ok(pubkey) => pubkey,
+							Err(e) => {
+								println!("ERROR: {}", e.to_string());
+								continue;
+							}
+						};
+
+					maker_execute(&channel_manager, &router, peer_pubkey, swapstring.swap_type, swapstring.asset_id, swapstring.payment_hash, payment_secret, outbound_payments.clone(), PathBuf::from(&ldk_data_dir));
+				}
 				"listpayments" => {
 					list_payments(inbound_payments.clone(), outbound_payments.clone())
 				}
@@ -1281,7 +1397,10 @@ fn help() {
 	println!("\n  Routing:");
 	println!("      getroute <dest_pubkey> <amt> [<asset_id>]");
 	println!("\n  Swaps:");
-	println!("      sendswap <exchange_pubkey> <buy|sell> <amt_msats> <asset_id> <amt_asset>");
+	println!("      [DEPRECATED] sendswap <exchange_pubkey> <buy|sell> <amt_msats> <asset_id> <amt_asset>");
+	println!("      makerinit <amount> <asset_id> <buy|sell> <price_msats_per_asset>");
+	println!("      taker <swap_string>");
+	println!("      makerexecute <payment_hash> <payment_secret> <peer_pubkey>");
 	println!("\n  Peers:");
 	println!("      connectpeer pubkey@host:port");
 	println!("      disconnectpeer <peer_pubkey>");
@@ -1473,49 +1592,28 @@ fn get_route(channel_manager: &ChannelManager, router: &Router, start: PublicKey
 	route.ok()
 }
 
-#[derive(Debug)]
-enum SwapType {
-	BuyAsset {
-		amount_rgb: u64,
-		amount_msats: u64,
-	},
-	SellAsset {
-		amount_rgb: u64,
-		amount_msats: u64,
-	}
-}	
-
-impl SwapType {
-	fn is_buy(&self) -> bool {
-		matches!(self, SwapType::BuyAsset{..})
-	}
-
-	fn amount_msats(&self) -> u64 {
-		match self {
-			SwapType::BuyAsset { amount_msats, .. } | SwapType::SellAsset { amount_msats, .. }=> *amount_msats
-		}
-	}
-	fn amount_rgb(&self) -> u64 {
-		match self {
-			SwapType::BuyAsset { amount_rgb, .. } | SwapType::SellAsset { amount_rgb, .. }=> *amount_rgb
-		}
-	}
+fn maker_init(channel_manager: &ChannelManager, swaptype: &SwapType) -> (PaymentHash, PaymentSecret) {
+	let (payment_hash, payment_secret) = channel_manager.create_inbound_payment(Some(swaptype.amount_msats()), 900, None).unwrap();	
+	(payment_hash, payment_secret)
 }
 
-fn send_swap(channel_manager: &ChannelManager, router: &Router, exchange: PublicKey, swaptype: SwapType, asset_id: ContractId,
-	payment_storage: PaymentInfoStorage, ldk_data_dir: PathBuf 
-) {
-	let first_leg = get_route(channel_manager, router, channel_manager.get_our_node_id(), exchange, if swaptype.is_buy() { None } else { Some(asset_id) }, if swaptype.is_buy() { Some(swaptype.amount_msats()) } else { None });
-	let second_leg = get_route(channel_manager, router, exchange, channel_manager.get_our_node_id(), if swaptype.is_buy() { Some(asset_id) } else { None }, if swaptype.is_buy() { None } else {Some(swaptype.amount_msats())});
+fn maker_execute(channel_manager: &ChannelManager, router: &Router, exchange: PublicKey, swaptype: SwapType, asset_id: ContractId, payment_hash: PaymentHash, payment_secret: PaymentSecret,
+	payment_storage: PaymentInfoStorage, ldk_data_dir: PathBuf)
+{
+	let payment_preimage = channel_manager.get_payment_preimage(payment_hash, payment_secret).unwrap();
+	let swaptype = swaptype.opposite();
 
-	let (first_leg, second_leg) = match (first_leg, second_leg) {
+	let first_leg = get_route(channel_manager, router, channel_manager.get_our_node_id(), exchange, if swaptype.is_buy() { None } else { Some(asset_id) }, if swaptype.is_buy() { Some(swaptype.amount_msats()) } else { None });
+	let second_leg = get_route(channel_manager, router, exchange, channel_manager.get_our_node_id(), if swaptype.is_buy() { Some(asset_id) } else { None }, if swaptype.is_buy() { Some(546000) } else {Some(swaptype.amount_msats())});
+
+	let (mut first_leg, mut second_leg) = match (first_leg, second_leg) {
 		(Some(f), Some(s)) => (f, s),
 		(Some(_), _) => {
-			println!("ERROR: unable to find path to the exchange");
+			println!("ERROR: unable to find from the exchange to us");
 			return;
 		}
 		(_, Some(_)) => {
-			println!("ERROR: unable to find from the exchange to us");
+			println!("ERROR: unable to find path to the exchange");
 			return;
 		}
 		_ => {
@@ -1523,6 +1621,13 @@ fn send_swap(channel_manager: &ChannelManager, router: &Router, exchange: Public
 			return;
 		}
 	};
+
+	// Set swap flag
+	second_leg.paths[0][0].short_channel_id |= 0x80000000_00000000;
+	if let SwapType::BuyAsset { .. } = swaptype {
+		// Override fee_msat of the last hop because it's set to the payment_amount
+		first_leg.paths[0].last_mut().expect("Path not to be empty").fee_msat = 546000;
+	}
 
 	let fullpaths = first_leg.paths[0].clone().into_iter().map(|mut hop| {
 			if let SwapType::SellAsset { amount_rgb, ..} = swaptype {
@@ -1543,8 +1648,6 @@ fn send_swap(channel_manager: &ChannelManager, router: &Router, exchange: Public
 		payment_params: Some(PaymentParameters::for_keysend(channel_manager.get_our_node_id(), 40)),
 	};
 
-	let (payment_hash, payment_secret) = channel_manager.create_inbound_payment(Some(swaptype.amount_msats()), 900, None).unwrap();	
-	let payment_preimage = channel_manager.get_payment_preimage(payment_hash, payment_secret).unwrap();
 	if let SwapType::SellAsset { amount_rgb, .. } = swaptype {
 		write_rgb_payment_info_file(&ldk_data_dir, &payment_hash, asset_id, amount_rgb);
 	}
@@ -1572,6 +1675,17 @@ fn send_swap(channel_manager: &ChannelManager, router: &Router, exchange: Public
 			amt_msat: MillisatAmount(Some(swaptype.amount_msats())),
 		},
 	);
+
+}
+
+fn send_swap(channel_manager: &ChannelManager, router: &Router, exchange: PublicKey, swaptype: SwapType, asset_id: ContractId,
+	payment_storage: PaymentInfoStorage, ldk_data_dir: PathBuf)
+{
+	// Need to flip the direction because we are sending the swap for ourselves, we are not the mm sending to execute the trade for the user
+	let swaptype = swaptype.opposite();
+
+	let (payment_hash, payment_secret) = maker_init(&channel_manager, &swaptype);
+	maker_execute(channel_manager, router, exchange, swaptype, asset_id, payment_hash, payment_secret, payment_storage, ldk_data_dir);
 }
 
 pub(crate) async fn connect_peer_if_necessary(
