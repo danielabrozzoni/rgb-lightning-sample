@@ -20,5 +20,5 @@
 	shallow = true
 [submodule "rust-lightning"]
 	path = rust-lightning
-	url = https://github.com/RGB-Tools/rust-lightning.git
+	url = https://github.com/afilini/rust-lightning-rgb.git
 	shallow = true
