@@ -1100,19 +1100,25 @@ pub(crate) async fn poll_for_user_input(
 					let swaptype = words.next();
 					let price = words.next();
 
-					if price.is_none() {
-						println!("ERROR: makerinit requires 4 args: makerinit <amount> <asset_id> <buy|sell> <price_msats_per_asset>");
+					if swaptype.is_none() {
+						println!("ERROR: makerinit requires at least 3 args: makerinit <amount> <asset_id> <buy|sell> [<price_msats_per_asset>]");
 						continue;
 					}
 
 					let asset_id = match ContractId::from_str(asset_id.unwrap()) {
-    						Ok(cid) => Some(cid),
+    						Ok(cid) => cid,
     						Err(_) => {
     							println!("ERROR: invalid contract ID: {}", asset_id.unwrap());
     							continue;
     						}
 						};
-					let price = price.unwrap().parse::<u64>();
+					let price = match price {
+						Some(x) if !x.trim().is_empty() => x.parse::<u64>().map_err(|_| ()),
+						_ => fetch_price(&asset_id).await.map_err(|e| {
+							dbg!(e);
+							()
+						}),
+					};
 					if price.is_err() {
 						println!("ERROR: invalid price_msats_per_asset");
 						continue;
@@ -1140,7 +1146,7 @@ pub(crate) async fn poll_for_user_input(
 					};
 
 					let (payment_hash, payment_secret) = maker_init(&channel_manager, &swaptype);
-					let swapstring = format!("{}:{}:{}:{}:{}", amt_asset, asset_id.unwrap(), swaptype.side(), price, hex_utils::hex_str(&payment_hash.0));
+					let swapstring = format!("{}:{}:{}:{}:{}", amt_asset, asset_id, swaptype.side(), price, hex_utils::hex_str(&payment_hash.0));
 					println!("SUCCESS! swap_string = {}", swapstring);
 
 					let payment_secret = hex_utils::hex_str(&payment_secret.0);
@@ -1398,7 +1404,7 @@ fn help() {
 	println!("      getroute <dest_pubkey> <amt> [<asset_id>]");
 	println!("\n  Swaps:");
 	println!("      [DEPRECATED] sendswap <exchange_pubkey> <buy|sell> <amt_msats> <asset_id> <amt_asset>");
-	println!("      makerinit <amount> <asset_id> <buy|sell> <price_msats_per_asset>");
+	println!("      makerinit <amount> <asset_id> <buy|sell> [<price_msats_per_asset>]");
 	println!("      taker <swap_string>");
 	println!("      makerexecute <payment_hash> <payment_secret> <peer_pubkey>");
 	println!("\n  Peers:");
@@ -1686,6 +1692,27 @@ fn send_swap(channel_manager: &ChannelManager, router: &Router, exchange: Public
 
 	let (payment_hash, payment_secret) = maker_init(&channel_manager, &swaptype);
 	maker_execute(channel_manager, router, exchange, swaptype, asset_id, payment_hash, payment_secret, payment_storage, ldk_data_dir);
+}
+
+/// Return the price in msats/asset
+async fn fetch_price(asset_id: &ContractId) -> Result<u64, Box<dyn std::error::Error>> {
+	#[derive(Debug, serde::Deserialize)]
+	struct BitfinexPrice {
+		last_price: String,
+	}
+
+	// TODO: map the asset to the right ticker. here we assume it's always USDt
+	let body = reqwest::get("https://api.bitfinex.com/v1/pubticker/btcust")
+    	.await?
+    	.json::<BitfinexPrice>()
+    	.await?;
+
+	let last_price = body.last_price.parse::<f64>()?;
+	let price = (1.0 / last_price * 1e11) as u64;
+
+	println!("Using price from Bitfinex: {} mSAT = 1 {}", price, asset_id);
+
+	Ok(price)
 }
 
 pub(crate) async fn connect_peer_if_necessary(
