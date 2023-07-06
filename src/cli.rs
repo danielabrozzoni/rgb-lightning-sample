@@ -185,6 +185,12 @@ pub(crate) async fn poll_for_user_input(
 						.address;
 					println!("Address: {address}");
 				}
+				"syncwallet" => {
+					let wallet = wallet_arc.lock().unwrap();
+					sync_wallet(&wallet, electrum_url.clone());
+
+					println!("Balance: {}", wallet.get_balance().unwrap());
+				}
 				"createutxos" => {
 					let wallet = wallet_arc.lock().unwrap();
 					sync_wallet(&wallet, electrum_url.clone());
@@ -1223,6 +1229,7 @@ fn help() {
 	println!("\n  Onchain:");
 	println!("      getaddress");
 	println!("      listunspent");
+	println!("      syncwallet");
 	println!("\n  RGB:");
 	println!("      createutxos");
 	println!("      issueasset <supply> <ticker> <name> <precision>");
