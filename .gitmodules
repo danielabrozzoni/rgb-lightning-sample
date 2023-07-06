@@ -1,10 +1,10 @@
 [submodule "client_side_validation"]
 	path = client_side_validation
-	url = git@github.com:RGB-Tools/client_side_validation.git
+	url = https://github.com/RGB-Tools/client_side_validation.git
 	shallow = true
 [submodule "rust-lightning"]
 	path = rust-lightning
-	url = git@github.com:RGB-Tools/rust-lightning.git
+	url = https://github.com/afilini/rust-lightning-rgb.git
 	shallow = true
 [submodule "rgb-wallet"]
 	path = rgb-wallet
