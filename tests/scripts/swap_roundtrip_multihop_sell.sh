@@ -25,7 +25,6 @@ list_channels 1
 list_channels 2
 asset_balance 1 100
 
-# refresh
 refresh 2
 asset_balance 2 400
 
@@ -36,38 +35,27 @@ list_channels 2 2
 list_channels 3
 asset_balance 2 100
 
+# needs more funding
+create_utxos 1
+create_utxos 2
+create_utxos 3
 
-# send payment
-get_colored_invoice 3 50
-send_payment 1 3 "$INVOICE"
+open_vanilla_channel 2 1 "$NODE1_PORT" "$NODE1_ID" 16777215
+list_channels 2 3
+list_channels 1 2
 
-list_channels 1
-list_channels 2 2
-list_channels 3
-list_payments 1
-list_payments 3
+open_vanilla_channel 3 2 "$NODE2_PORT" "$NODE2_ID" 16777215
+list_channels 3 2
+list_channels 2 4
 
-# close channels
-close_channel 2 1 "$NODE1_ID" "$channel12_id"
-asset_balance 1 550
-asset_balance 2 150
-close_channel 3 2 "$NODE2_ID" "$channel23_id"
-asset_balance 2 400
-asset_balance 3 50
+sleep 10
 
-# spend RGB assets on-chain
-_skip_remaining
-blind 3
-send_assets 1 200
-blind 3
-send_assets 2 150
-mine 1
-refresh 3
-blind 2
-send_assets 3 375
-refresh 2
-asset_balance 1 350
-asset_balance 2 625
-asset_balance 3 25
+maker_init 3 2 "sell" 90
+taker 1
+taker_list 1 1
+maker_list 3 1
+maker_execute 3
+list_payments 1 0
+list_payments 3 2
 
 exit 0
