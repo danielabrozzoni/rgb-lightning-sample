@@ -9,6 +9,7 @@ mod error;
 mod hex_utils;
 mod proxy;
 mod rgb_utils;
+mod swap;
 
 use crate::bdk_utils::{broadcast_tx, get_bdk_wallet, get_bdk_wallet_seckey, sync_wallet};
 use crate::bitcoind_client::BitcoindClient;
@@ -16,6 +17,7 @@ use crate::disk::FilesystemLogger;
 use crate::proxy::post_consignment;
 use crate::rgb_utils::{get_asset_owned_values, update_transition_beneficiary, RgbUtilities};
 use bdk::bitcoin::psbt::PartiallySignedTransaction;
+use crate::swap::SwapType;
 use bdk::bitcoin::OutPoint;
 use bdk::bitcoin::Txid;
 use bdk::database::SqliteDatabase;
@@ -52,6 +54,7 @@ use lightning::rgb_utils::{
 use lightning::routing::gossip;
 use lightning::routing::gossip::{NodeId, P2PGossipSync};
 use lightning::routing::router::DefaultRouter;
+use lightning::routing::scoring::ProbabilisticScorerUsingTime;
 use lightning::util::config::UserConfig;
 use lightning::util::ser::ReadableArgs;
 use lightning_background_processor::{process_events_async, GossipSync};
@@ -67,7 +70,7 @@ use rgb::validation::ConsignmentApi;
 use rgb_core::Assign;
 use rgb_schemata::{nia_rgb20, nia_schema};
 use rgbstd::containers::{Bindle, BuilderSeal, Transfer as RgbTransfer};
-use rgbstd::contract::GraphSeal;
+use rgbstd::contract::{ContractId, GraphSeal};
 use rgbstd::interface::{rgb20, TypedState, TransitionBuilder};
 use rgbstd::persistence::{Inventory, Stash};
 use rgbstd::validation::Validity;
@@ -142,6 +145,10 @@ pub(crate) type PeerManager = SimpleArcPeerManager<
 	FilesystemLogger,
 >;
 
+pub(crate) type Scorer = ProbabilisticScorerUsingTime<Arc<NetworkGraph>, Arc<FilesystemLogger>, std::time::Instant>;
+
+pub(crate) type Router = DefaultRouter<Arc<NetworkGraph>, Arc<FilesystemLogger>, Arc<Mutex<Scorer>>>;
+
 pub(crate) type ChannelManager =
 	SimpleArcChannelManager<ChainMonitor, BitcoindClient, BitcoindClient, FilesystemLogger>;
 
@@ -155,6 +162,7 @@ async fn handle_ldk_events(
 	outbound_payments: &PaymentInfoStorage, network: Network, event: Event, ldk_data_dir: String,
 	proxy_client: Arc<RestClient>, proxy_url: String,
 	wallet_arc: Arc<Mutex<Wallet<SqliteDatabase>>>, electrum_url: String,
+	whitelisted_trades: &Arc<Mutex<HashMap<PaymentHash, (ContractId, SwapType)>>>
 ) {
 	match event {
 		Event::FundingGenerationReady {
@@ -911,7 +919,78 @@ async fn handle_ldk_events(
 			// A "real" node should probably "lock" the UTXOs spent in funding transactions until
 			// the funding transaction either confirms, or this event is generated.
 		}
-		Event::HTLCIntercepted { .. } => {}
+		Event::HTLCIntercepted { is_swap, payment_hash, intercept_id, inbound_amount_msat, expected_outbound_amount_msat, inbound_rgb_amount, expected_outbound_rgb_amount, requested_next_hop_scid, prev_short_channel_id } => {
+			if !is_swap {
+				channel_manager.fail_intercepted_htlc(intercept_id).unwrap();
+			}
+
+			let ldk_data_dir_path = PathBuf::from(ldk_data_dir.clone());
+			let get_rgb_info = |channel_id| {
+				let info_file_path = ldk_data_dir_path.join(hex::encode(channel_id));
+				if info_file_path.exists() {
+					let (rgb_info, _) = get_rgb_channel_info(channel_id, &ldk_data_dir_path);
+					Some((
+						rgb_info.contract_id,
+						rgb_info.local_rgb_amount,
+						rgb_info.remote_rgb_amount,
+					))
+				} else {
+					None
+				}
+			};
+
+			let inbound_channel = channel_manager.list_channels().into_iter().find(|details| details.short_channel_id == Some(prev_short_channel_id)).expect("Should always be a valid channel");
+			let outbound_channel = channel_manager.list_channels().into_iter().find(|details| details.short_channel_id == Some(requested_next_hop_scid)).expect("Should always be a valid channel");
+
+			let inbound_rgb_info = get_rgb_info(&inbound_channel.channel_id);
+			let outbound_rgb_info = get_rgb_info(&outbound_channel.channel_id);
+
+			println!("EVENT: Requested swap with params inbound_msat={} outbound_msat={} inbound_rgb={:?} outbound_rgb={:?} inbound_contract_id={:?}, outbound_contract_id={:?}", inbound_amount_msat, expected_outbound_amount_msat, inbound_rgb_amount, expected_outbound_rgb_amount, inbound_rgb_info.map(|i| i.0), outbound_rgb_info.map(|i| i.0));
+
+			let mut trades_lock = whitelisted_trades.lock().unwrap();
+			let (whitelist_contract_id, whitelist_swap_type) = match trades_lock.get(&payment_hash) {
+				None => {
+					println!("ERROR: rejecting non-whitelisted swap");
+					channel_manager.fail_intercepted_htlc(intercept_id).unwrap();
+					return;
+				},
+				Some(x) => x,
+			};
+
+			match whitelist_swap_type {
+				SwapType::BuyAsset { amount_rgb, amount_msats } => {
+					let net_msat_diff = expected_outbound_amount_msat.saturating_sub(inbound_amount_msat);
+
+					if inbound_rgb_amount != Some(*amount_rgb) ||
+						inbound_rgb_info.map(|x| x.0) != Some(*whitelist_contract_id) ||
+						net_msat_diff != *amount_msats ||
+						outbound_rgb_info.is_some()
+						{
+						println!("ERROR: swap doesn't match the whitelisted info, rejecting it");
+						channel_manager.fail_intercepted_htlc(intercept_id).unwrap();
+						return;
+					}
+				}
+				SwapType::SellAsset { amount_rgb, amount_msats } => {
+					let net_msat_diff = inbound_amount_msat.saturating_sub(expected_outbound_amount_msat);
+
+					if expected_outbound_rgb_amount != Some(*amount_rgb) ||
+						outbound_rgb_info.map(|x| x.0) != Some(*whitelist_contract_id) ||
+						net_msat_diff != *amount_msats ||
+						inbound_rgb_info.is_some()
+						{
+						println!("ERROR: swap doesn't match the whitelisted info, rejecting it");
+						channel_manager.fail_intercepted_htlc(intercept_id).unwrap();
+						return;
+					}
+				}
+			}
+
+			println!("Swap is whitelisted, forwarding the htlc...");
+			trades_lock.remove(&payment_hash);
+
+			channel_manager.forward_intercepted_htlc(intercept_id, channelmanager::NextHopForward::ShortChannelId(requested_next_hop_scid), expected_outbound_amount_msat, expected_outbound_rgb_amount).expect("Forward should be valid");
+		}
 	}
 }
 
@@ -1097,6 +1176,7 @@ async fn start_ldk() {
 	// Step 11: Initialize the ChannelManager
 	let mut user_config = UserConfig::default();
 	user_config.channel_handshake_limits.force_announced_channel_preference = false;
+	user_config.accept_intercept_htlcs = true;
 	let mut restarting_node = true;
 	let (channel_manager_blockhash, channel_manager) = {
 		if let Ok(mut f) = fs::File::open(format!("{}/manager", ldk_data_dir.clone())) {
@@ -1111,7 +1191,7 @@ async fn start_ldk() {
 				fee_estimator.clone(),
 				chain_monitor.clone(),
 				broadcaster.clone(),
-				router,
+				router.clone(),
 				logger.clone(),
 				user_config,
 				channel_monitor_mut_references,
@@ -1130,7 +1210,7 @@ async fn start_ldk() {
 				fee_estimator.clone(),
 				chain_monitor.clone(),
 				broadcaster.clone(),
-				router,
+				router.clone(),
 				logger.clone(),
 				keys_manager.clone(),
 				keys_manager.clone(),
@@ -1278,6 +1358,7 @@ async fn start_ldk() {
 
 	// Step 18: Handle LDK Events
 	let channel_manager_event_listener = Arc::clone(&channel_manager);
+	let whitelisted_trades = Arc::new(Mutex::new(HashMap::new()));
 	let network_graph_event_listener = Arc::clone(&network_graph);
 	let keys_manager_event_listener = Arc::clone(&keys_manager);
 	let inbound_payments_event_listener = Arc::clone(&inbound_payments);
@@ -1286,6 +1367,7 @@ async fn start_ldk() {
 	let ldk_data_dir_copy = ldk_data_dir.clone();
 	let proxy_client_copy = proxy_client.clone();
 	let wallet_copy = wallet.clone();
+	let whitelisted_trades_copy = whitelisted_trades.clone();
 	let event_handler = move |event: Event| {
 		let channel_manager_event_listener = Arc::clone(&channel_manager_event_listener);
 		let network_graph_event_listener = Arc::clone(&network_graph_event_listener);
@@ -1295,6 +1377,7 @@ async fn start_ldk() {
 		let ldk_data_dir_copy = ldk_data_dir_copy.clone();
 		let proxy_client_copy = proxy_client_copy.clone();
 		let wallet_copy = wallet_copy.clone();
+		let whitelisted_trades_copy = whitelisted_trades_copy.clone();
 		async move {
 			handle_ldk_events(
 				&channel_manager_event_listener,
@@ -1309,6 +1392,7 @@ async fn start_ldk() {
 				proxy_url.to_string(),
 				wallet_copy,
 				electrum_url.to_string(),
+				&whitelisted_trades_copy,
 			)
 			.await;
 		}
@@ -1405,6 +1489,7 @@ async fn start_ldk() {
 		Arc::clone(&keys_manager),
 		Arc::clone(&network_graph),
 		Arc::clone(&onion_messenger),
+		Arc::clone(&router),
 		inbound_payments,
 		outbound_payments,
 		ldk_data_dir.clone(),
@@ -1416,6 +1501,7 @@ async fn start_ldk() {
 		proxy_endpoint,
 		wallet.clone(),
 		electrum_url.to_string(),
+		whitelisted_trades,
 	)
 	.await;
 
