@@ -30,7 +30,7 @@ start_node 3
 asset_balance 1 1000
 
 # open channel
-open_channel 1 2 "$NODE2_PORT" "$NODE2_ID" 600
+open_colored_channel 1 2 "$NODE2_PORT" "$NODE2_ID" 600
 _tit "restart nodes"
 exit_node 1
 start_node 1
