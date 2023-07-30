@@ -1659,7 +1659,7 @@ fn maker_execute(channel_manager: &ChannelManager, router: &Router, exchange: Pu
 		write_rgb_payment_info_file(&ldk_data_dir, &payment_hash, asset_id, amount_rgb);
 	}
 
-	let status = match channel_manager.send_spontaneous_payment(&route, Some(payment_preimage), RecipientOnionFields::spontaneous_empty(), PaymentId(payment_hash.0)) {
+	let status = match channel_manager.send_spontaneous_payment(&route, Some(payment_preimage), RecipientOnionFields::spontaneous_empty(), PaymentId(payment_hash.0), None) {
 		Ok(_payment_hash) => {
 			println!("EVENT: initiated swap");
 			print!("> ");
@@ -1869,6 +1869,7 @@ fn keysend<E: EntropySource>(
 		PaymentId(payment_hash.0),
 		route_params,
 		Retry::Timeout(Duration::from_secs(10)),
+		Some(amt_rgb),
 	) {
 		Ok(_payment_hash) => {
 			println!("EVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);
