@@ -192,12 +192,6 @@ pub(crate) async fn poll_for_user_input(
 						.address;
 					println!("Address: {address}");
 				}
-				"syncwallet" => {
-					let wallet = wallet_arc.lock().unwrap();
-					sync_wallet(&wallet, electrum_url.clone());
-
-					println!("Balance: {}", wallet.get_balance().unwrap());
-				}
 				"createutxos" => {
 					let wallet = wallet_arc.lock().unwrap();
 					sync_wallet(&wallet, electrum_url.clone());
@@ -813,6 +807,8 @@ pub(crate) async fn poll_for_user_input(
 						channel_manager.clone(),
 						proxy_endpoint,
 						is_colored,
+						Arc::clone(&wallet_arc),
+						&electrum_url,
 					);
 					if open_channel_result.is_err() {
 						continue;
@@ -864,6 +860,47 @@ pub(crate) async fn poll_for_user_input(
 					);
 				}
 				"keysend" => {
+					let keysend_cmd = "`keysend <dest_pubkey> <amt_msat>";
+					let dest_pubkey = match words.next() {
+						Some(dest) => match hex_utils::to_compressed_pubkey(dest) {
+							Some(pk) => pk,
+							None => {
+								println!("ERROR: couldn't parse destination pubkey");
+								continue;
+							}
+						},
+						None => {
+							println!("ERROR: keysend requires a destination pubkey: {keysend_cmd}");
+							continue;
+						}
+					};
+					let amt_msat_str =
+						match words.next() {
+							Some(amt) => amt,
+							None => {
+								println!("ERROR: keysend requires an amount in millisatoshis: {keysend_cmd}");
+								continue;
+							}
+						};
+					let amt_msat: u64 = match amt_msat_str.parse() {
+						Ok(amt) => amt,
+						Err(e) => {
+							println!("ERROR: couldn't parse amount_msat: {}", e);
+							continue;
+						}
+					};
+					keysend(
+						&*channel_manager,
+						dest_pubkey,
+						amt_msat,
+						&*keys_manager,
+						outbound_payments.clone(),
+						None,
+						PathBuf::from(&ldk_data_dir),
+					);
+
+				}
+				"coloredkeysend" => {
 					let keysend_cmd = "`keysend <dest_pubkey> <amt_msat> <contract_id> <amt_rgb>`";
 					let dest_pubkey = match words.next() {
 						Some(dest) => match hex_utils::to_compressed_pubkey(dest) {
@@ -930,8 +967,7 @@ pub(crate) async fn poll_for_user_input(
 						amt_msat,
 						&*keys_manager,
 						outbound_payments.clone(),
-						contract_id,
-						amt_rgb,
+						Some((contract_id, amt_rgb)),
 						PathBuf::from(&ldk_data_dir),
 					);
 				}
@@ -1057,38 +1093,6 @@ pub(crate) async fn poll_for_user_input(
 				}
 				"listchannels" => {
 					list_channels(&channel_manager, &network_graph, ldk_data_dir.clone())
-				}
-				"getroute" => {
-					let dest = words.next();
-					let asset_id = words.next();
-
-					if dest.is_none() {
-						println!("ERROR: destination is required");
-						continue;
-					}
-
-					let dest =
-						match bitcoin::secp256k1::PublicKey::from_str(dest.unwrap()) {
-							Ok(pubkey) => pubkey,
-							Err(e) => {
-								println!("ERROR: {}", e.to_string());
-								continue;
-							}
-						};
-					let asset_id = if let Some(asset_id) = asset_id {
-						match ContractId::from_str(asset_id) {
-							Ok(cid) => Some(cid),
-							Err(_) => {
-								println!("ERROR: invalid contract ID: {asset_id}");
-								continue;
-							}
-						}
-					} else {
-						None
-					};
-
-					let route = get_route(&channel_manager, &router, channel_manager.get_our_node_id(), dest, asset_id, None);
-					println!("{:#?}", route.as_ref().map(|x| &x.paths));
 				}
 				"makerinit" => {
 					let amt_asset = words.next();
@@ -1410,7 +1414,8 @@ fn help() {
 	println!("      listpeers");
 	println!("\n  Payments:");
 	println!("      sendpayment <invoice>");
-	println!("      keysend <dest_pubkey> <amt_msats> <rgb_contract_id> <amt_rgb>");
+	println!("      coloredkeysend <dest_pubkey> <amt_msats> <rgb_contract_id> <amt_rgb>");
+	println!("      keysend <dest_pubkey> <amt_msats>");
 	println!("      listpayments");
 	println!("\n  Invoices:");
 	println!("      getcoloredinvoice <amt_msats> <expiry_secs> <rgb_contract_id> <amt_rgb>");
@@ -1419,7 +1424,6 @@ fn help() {
 	println!("\n  Onchain:");
 	println!("      getaddress");
 	println!("      listunspent");
-	println!("      syncwallet");
 	println!("\n  RGB:");
 	println!("      createutxos");
 	println!("      issueasset <supply> <ticker> <name> <precision>");
@@ -1767,8 +1771,13 @@ fn do_disconnect_peer(
 
 fn open_channel(
 	peer_pubkey: PublicKey, channel_amt_sat: u64, push_amt_msat: u64, announced_channel: bool,
-	channel_manager: Arc<ChannelManager>, proxy_endpoint: &str, is_colored: bool,
+	channel_manager: Arc<ChannelManager>, proxy_endpoint: &str, is_colored: bool, wallet: Arc<Mutex<Wallet<SqliteDatabase>>>, electrum_url: &str
 ) -> Result<[u8; 32], ()> {
+	{
+		let wallet = wallet.lock().unwrap();
+		sync_wallet(&wallet, electrum_url.to_string());
+	}
+
 	let config = UserConfig {
 		channel_handshake_limits: ChannelHandshakeLimits {
 			// lnd's max to_self_delay is 2016, so we want to be compatible.
@@ -1852,12 +1861,14 @@ fn send_payment(
 
 fn keysend<E: EntropySource>(
 	channel_manager: &ChannelManager, payee_pubkey: PublicKey, amt_msat: u64, entropy_source: &E,
-	payment_storage: PaymentInfoStorage, contract_id: ContractId, amt_rgb: u64,
+	payment_storage: PaymentInfoStorage, rgb_payment: Option<(ContractId, u64)>,
 	ldk_data_dir: PathBuf,
 ) {
 	let payment_preimage = PaymentPreimage(entropy_source.get_secure_random_bytes());
 	let payment_hash = PaymentHash(Sha256::hash(&payment_preimage.0[..]).into_inner());
-	write_rgb_payment_info_file(&ldk_data_dir, &payment_hash, contract_id, amt_rgb);
+	if let Some((contract_id, amt_rgb)) = rgb_payment {
+		write_rgb_payment_info_file(&ldk_data_dir, &payment_hash, contract_id, amt_rgb);
+	}
 
 	let route_params = RouteParameters {
 		payment_params: PaymentParameters::for_keysend(payee_pubkey, 40),
@@ -1869,7 +1880,7 @@ fn keysend<E: EntropySource>(
 		PaymentId(payment_hash.0),
 		route_params,
 		Retry::Timeout(Duration::from_secs(10)),
-		Some(amt_rgb),
+		rgb_payment.map(|(_, v)| v)
 	) {
 		Ok(_payment_hash) => {
 			println!("EVENT: initiated sending {} msats to {}", amt_msat, payee_pubkey);

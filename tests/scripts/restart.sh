@@ -46,7 +46,7 @@ list_channels 2
 asset_balance 1 400
 
 # send assets
-keysend 1 2 "$NODE2_ID" 100
+colored_keysend 1 2 "$NODE2_ID" 100
 _tit "restart nodes"
 exit_node 1
 start_node 1

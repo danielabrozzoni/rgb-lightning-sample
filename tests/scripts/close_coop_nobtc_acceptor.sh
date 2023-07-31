@@ -19,7 +19,7 @@ list_channels 2
 asset_balance 1 400
 
 # send assets
-keysend 1 2 "$NODE2_ID" 100
+colored_keysend 1 2 "$NODE2_ID" 100
 list_channels 1
 list_channels 2
 list_payments 1

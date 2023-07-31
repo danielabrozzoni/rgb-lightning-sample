@@ -37,7 +37,7 @@ list_channels 3
 asset_balance 2 0
 
 # send assets and exit intermediate node while payment is goind through
-keysend_init 1 3 "$NODE3_ID" 50
+colored_keysend_init 1 3 "$NODE3_ID" 50
 _wait_for_text "$T_1" node2 "HANDLED UPDATE ADD HTLC"
 timestamp
 _wait_for_text "$T_1" node2 "HANDLED REVOKE AND ACK"

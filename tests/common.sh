@@ -133,11 +133,6 @@ fund_address() {
     mine 1
 }
 
-sync_wallet() {
-    local num="$1"
-    $TMUX_CMD send-keys -t node$num "syncwallet" C-m
-}
-
 create_utxos() {
     local num get_funds
     num="$1"
@@ -411,7 +406,7 @@ forceclose_channel() {
     mine 1
 }
 
-keysend_init() {
+colored_keysend_init() {
     local src_num dst_num dst_id rgb_amt
     src_num="$1"
     dst_num="$2"
@@ -419,7 +414,45 @@ keysend_init() {
     rgb_amt="$4"
 
     _tit "send $rgb_amt assets off-chain from node $src_num to node $dst_num"
-    $TMUX_CMD send-keys -t "node$src_num" "keysend $dst_id 3000000 $ASSET_ID $rgb_amt" C-m
+    $TMUX_CMD send-keys -t "node$src_num" "coloredkeysend $dst_id 3000000 $ASSET_ID $rgb_amt" C-m
+    timestamp
+    check "$src_num"
+    _wait_for_text_multi $T_1 "node$src_num" "keysend" "EVENT: initiated sending"
+    timestamp
+}
+
+colored_keysend() {
+    local src_num dst_num dst_id rgb_amt
+    src_num="$1"
+    dst_num="$2"
+    dst_id="$3"
+    rgb_amt="$4"
+
+    colored_keysend_init "$src_num" "$dst_num" "$dst_id" "$rgb_amt"
+
+    _wait_for_text_multi $T_1 "node$src_num" "keysend" "EVENT: successfully sent payment"
+    timestamp
+    _wait_for_text_multi $T_1 "node$src_num" "EVENT: successfully sent payment" "HANDLED REVOKE AND ACK"
+    timestamp
+
+    check "$dst_num"
+    _wait_for_text $T_1 "node$dst_num" "EVENT: received payment"
+    timestamp
+    _wait_for_text_multi $T_1 "node$dst_num" "EVENT: received payment" "Event::PaymentClaimed end"
+    timestamp
+    _wait_for_text_multi $T_1 "node$dst_num" "Event::PaymentClaimed end" "HANDLED COMMITMENT SIGNED"
+    timestamp
+}
+
+keysend_init() {
+    local src_num dst_num dst_id sats_amt
+    src_num="$1"
+    dst_num="$2"
+    dst_id="$3"
+    sats_amt="$4"
+
+    _tit "send $sats_amt sats off-chain from node $src_num to node $dst_num"
+    $TMUX_CMD send-keys -t "node$src_num" "keysend $dst_id $sats_amt" C-m
     timestamp
     check "$src_num"
     _wait_for_text_multi $T_1 "node$src_num" "keysend" "EVENT: initiated sending"
@@ -427,13 +460,13 @@ keysend_init() {
 }
 
 keysend() {
-    local src_num dst_num dst_id rgb_amt
+    local src_num dst_num dst_id sats_amt
     src_num="$1"
     dst_num="$2"
     dst_id="$3"
-    rgb_amt="$4"
+    sats_amt="$4"
 
-    keysend_init "$src_num" "$dst_num" "$dst_id" "$rgb_amt"
+    keysend_init "$src_num" "$dst_num" "$dst_id" "$sats_amt"
 
     _wait_for_text_multi $T_1 "node$src_num" "keysend" "EVENT: successfully sent payment"
     timestamp
@@ -625,6 +658,21 @@ maker_execute() {
     _wait_for_text $T_1 node$node "Event::PaymentClaimed end"
     timestamp
     _wait_for_text_multi $T_1 node$node "Event::PaymentClaimed end" "HANDLED COMMITMENT SIGNED"
+    timestamp
+
+}
+
+maker_execute_expect_failure() {
+    local node taker_pk
+    node="$1"
+    taker_pk="$2"
+
+    _tit "node $node completing the trade..."
+    $TMUX_CMD send-keys -t node$node "makerexecute $swap_string $payment_secret $taker_pk" C-m
+    timestamp
+    _wait_for_text_multi $T_1 node$node "makerexecute" "EVENT: initiated swap"
+    timestamp
+    _wait_for_text_multi $T_1 node$node "makerexecute" "EVENT: Failed to send payment to payment hash .* RetriesExhausted>"
     timestamp
 
 }

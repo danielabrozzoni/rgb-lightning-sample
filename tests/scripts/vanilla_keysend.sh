@@ -17,12 +17,10 @@ open_vanilla_channel 1 2 "$NODE2_PORT" "$NODE2_ID" 16777215
 list_channels 1
 list_channels 2
 
-# get invoice
-get_vanilla_invoice 2 3000000
-
 # send payment
-send_payment 1 2 "$INVOICE"
+keysend 1 2 "$NODE2_ID" 3000000
 list_channels 1
 list_channels 2
 list_payments 1
 list_payments 2
+
