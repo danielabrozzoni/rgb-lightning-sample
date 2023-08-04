@@ -13,6 +13,9 @@ use crate::{
 	PaymentInfoStorage, PeerManager,
 };
 use crate::{FEE_RATE, UTXO_SIZE_SAT};
+use lightning::routing::router::{
+	Hints, Path as LnPath, Route, Router as RouterTrait, DEFAULT_MAX_TOTAL_CLTV_EXPIRY_DELTA,
+};
 
 use amplify::none;
 use bdk::bitcoin::hashes::Hash;
@@ -70,6 +73,15 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::FilesystemLogger;
+use lightning::routing::router::DefaultRouter;
+use lightning::routing::scoring::ProbabilisticScorerUsingTime;
+
+pub(crate) type Scorer =
+	ProbabilisticScorerUsingTime<Arc<NetworkGraph>, Arc<FilesystemLogger>, std::time::Instant>;
+pub(crate) type Router =
+	DefaultRouter<Arc<NetworkGraph>, Arc<FilesystemLogger>, Arc<Mutex<Scorer>>>;
+
 const MIN_CREATE_UTXOS_SATS: u64 = 10000;
 const UTXO_NUM: u8 = 4;
 
@@ -122,8 +134,8 @@ pub(crate) async fn poll_for_user_input(
 	peer_manager: Arc<PeerManager>, channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>, network_graph: Arc<NetworkGraph>,
 	onion_messenger: Arc<OnionMessenger>, inbound_payments: PaymentInfoStorage,
-	outbound_payments: PaymentInfoStorage, ldk_data_dir: String, network: Network,
-	logger: Arc<disk::FilesystemLogger>, bitcoind_client: Arc<BitcoindClient>,
+	router: Arc<Router>, outbound_payments: PaymentInfoStorage, ldk_data_dir: String,
+	network: Network, logger: Arc<disk::FilesystemLogger>, bitcoind_client: Arc<BitcoindClient>,
 	proxy_client: Arc<RestClient>, proxy_url: &str, proxy_endpoint: &str,
 	wallet_arc: Arc<Mutex<Wallet<SqliteDatabase>>>, electrum_url: String,
 ) {
@@ -1075,6 +1087,55 @@ pub(crate) async fn poll_for_user_input(
 
 					close_channel(channel_id, peer_pubkey, channel_manager.clone());
 				}
+				"getroute" => {
+					let source = words.next();
+					let dest = words.next();
+					let asset_id = words.next();
+
+					if source.is_none() {
+						println!("ERROR: source is required");
+						continue;
+					}
+
+					let source = match bitcoin::secp256k1::PublicKey::from_str(source.unwrap()) {
+						Ok(pubkey) => pubkey,
+						Err(e) => {
+							println!("ERROR: {}", e.to_string());
+							continue;
+						}
+					};
+
+					if dest.is_none() {
+						println!("ERROR: destination is required");
+						continue;
+					}
+
+					let dest = match bitcoin::secp256k1::PublicKey::from_str(dest.unwrap()) {
+						Ok(pubkey) => pubkey,
+						Err(e) => {
+							println!("ERROR: {}", e.to_string());
+							continue;
+						}
+					};
+
+					if asset_id.is_none() {
+						println!("ERROR: asset_id is required");
+						continue;
+					}
+
+                    let asset_id = asset_id.unwrap();
+					let asset_id = match ContractId::from_str(asset_id) {
+						Ok(cid) => cid,
+						Err(_) => {
+							println!("ERROR: invalid contract ID: {asset_id}");
+							continue;
+						}
+					};
+
+					let route = get_route(&channel_manager, &router, source, dest, asset_id, None);
+					println!("{:?}", route.as_ref().map(|x| &x.paths));
+				}
+
 				"forceclosechannel" => {
 					let channel_id_str = words.next();
 					if channel_id_str.is_none() {
@@ -1679,4 +1740,31 @@ pub(crate) async fn get_utxo(ldk_data_dir: &str) -> RgbUtxo {
 pub(crate) async fn mine(bitcoind_client: &BitcoindClient, num_blocks: u16) {
 	let address = bitcoind_client.get_new_address().await.to_string();
 	bitcoind_client.generate_to_adress(num_blocks, address).await;
+}
+
+fn get_route(
+	channel_manager: &ChannelManager, router: &Router, start: PublicKey, dest: PublicKey,
+	asset_id: ContractId, final_value_msat: Option<u64>,
+) -> Option<Route> {
+	let inflight_htlcs = channel_manager.compute_inflight_htlcs();
+	let payment_params = PaymentParameters {
+		payee_pubkey: dest,
+		features: None,
+		route_hints: Hints::Clear(vec![]),
+		expiry_time: None,
+		max_total_cltv_expiry_delta: DEFAULT_MAX_TOTAL_CLTV_EXPIRY_DELTA,
+		max_path_count: 1,
+		max_channel_saturation_power_of_half: 2,
+		previously_failed_channels: vec![],
+		final_cltv_expiry_delta: 14,
+	};
+	let route = router.find_route(
+		&start,
+		&RouteParameters { payment_params, final_value_msat: final_value_msat.unwrap_or(546000) },
+		None,
+		&inflight_htlcs,
+		asset_id,
+	);
+
+	route.ok()
 }

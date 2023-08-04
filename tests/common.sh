@@ -501,3 +501,15 @@ check_channel_reestablish() {
     _wait_for_text_multi $T_1 "node$num" "$prevtext" "HANDLED CHANNEL READY" >/dev/null
     timestamp
 }
+
+get_route() {
+    local node s d amt
+    node="$1"
+    s="$2"
+    d="$3"
+    asset="$4"
+    _tit "getroute from $s to $d"
+    $TMUX_CMD send-keys -t node$node "getroute $s $d $asset" C-m
+    _wait_for_text 5 node$node "Some.*"
+}
+
