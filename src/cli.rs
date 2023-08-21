@@ -8,8 +8,7 @@ use crate::proxy::{get_consignment, post_consignment};
 use crate::rgb_utils::get_asset_owned_values;
 use crate::rgb_utils::get_rgb_total_amount;
 use crate::rgb_utils::RgbUtilities;
-use crate::swap::SwapString;
-use crate::swap::SwapType;
+use crate::swap::{SwapString, SwapType, get_current_timestamp};
 use crate::{
 	ChannelManager, HTLCStatus, MillisatAmount, NetworkGraph, OnionMessenger, PaymentInfo,
 	PaymentInfoStorage, PeerManager, Router,
@@ -1101,10 +1100,11 @@ pub(crate) async fn poll_for_user_input(
 					let amt_asset = words.next();
 					let asset_id = words.next();
 					let swaptype = words.next();
+					let timeout = words.next();
 					let price = words.next();
 
-					if swaptype.is_none() {
-						println!("ERROR: makerinit requires at least 3 args: makerinit <amount> <asset_id> <buy|sell> [<price_msats_per_asset>]");
+					if timeout.is_none() {
+						println!("ERROR: makerinit requires at least 4 args: makerinit <amount> <asset_id> <buy|sell> <timeout> [<price_msats_per_asset>]");
 						continue;
 					}
 
@@ -1115,6 +1115,12 @@ pub(crate) async fn poll_for_user_input(
 							continue;
 						}
 					};
+					let timeout = timeout.unwrap().parse();
+					if timeout.is_err() {
+						println!("Invalid timeout value");
+						continue;
+					}
+					let timeout = timeout.unwrap();
 					let price = match price {
 						Some(x) if !x.trim().is_empty() => x.parse::<u64>().map_err(|_| ()),
 						_ => fetch_price(&asset_id).await.map_err(|e| {
@@ -1147,13 +1153,15 @@ pub(crate) async fn poll_for_user_input(
 						}
 					};
 
-					let (payment_hash, payment_secret) = maker_init(&channel_manager, &swaptype);
+					let (payment_hash, payment_secret) = maker_init(&channel_manager, &swaptype, timeout);
+					let expiry = get_current_timestamp() + timeout as u64;
 					let swapstring = format!(
-						"{}:{}:{}:{}:{}",
+						"{}:{}:{}:{}:{}:{}",
 						amt_asset,
 						asset_id,
 						swaptype.side(),
 						price,
+						expiry,
 						hex_utils::hex_str(&payment_hash.0)
 					);
 					println!("SUCCESS! swap_string = {}", swapstring);
@@ -1181,12 +1189,33 @@ pub(crate) async fn poll_for_user_input(
 						}
 					};
 
+					if get_current_timestamp() > swapstring.expiry {
+						println!("ERROR: the swap offer has already expired");
+						continue;
+					}
+
 					whitelisted_trades.lock().unwrap().insert(
 						swapstring.payment_hash,
 						(swapstring.asset_id, swapstring.swap_type),
 					);
 					println!("SUCCESS: Trade whitelisted!");
 					println!("our_pk: {}", channel_manager.get_our_node_id());
+				}
+				"takerlist" => {
+					let lock = whitelisted_trades.lock().unwrap();
+					println!("[");
+					for (k, v) in lock.iter() {
+						println!("\t{{");
+
+						println!("\t\tpayment_hash: {}", hex_utils::hex_str(&k.0));
+						println!("\t\tcontract_id: {}", v.0);
+						println!("\t\tside: {}", v.1.side());
+						println!("\t\tamount_msats: {}", v.1.amount_msats());
+						println!("\t\tamount_rgb: {}", v.1.amount_rgb());
+
+						println!("\t}},");
+					}
+					println!("]");
 				}
 				"makerexecute" => {
 					let swapstring = words.next();
@@ -1205,6 +1234,7 @@ pub(crate) async fn poll_for_user_input(
 							continue;
 						}
 					};
+
 					let payment_secret = hex_utils::to_vec(payment_secret.unwrap())
 						.and_then(|vec| vec.try_into().ok())
 						.map(|slice| PaymentSecret(slice));
@@ -1433,8 +1463,9 @@ fn help() {
 	println!("\n  Routing:");
 	println!("      getroute <dest_pubkey> <amt> [<asset_id>]");
 	println!("\n  Swaps:");
-	println!("      makerinit <amount> <asset_id> <buy|sell> [<price_msats_per_asset>]");
+	println!("      makerinit <amount> <asset_id> <buy|sell> <timeout> [<price_msats_per_asset>]");
 	println!("      taker <swap_string>");
+	println!("      takerlist");
 	println!("      makerexecute <payment_hash> <payment_secret> <peer_pubkey>");
 	println!("\n  Peers:");
 	println!("      connectpeer pubkey@host:port");
@@ -1641,10 +1672,10 @@ fn get_route(
 }
 
 fn maker_init(
-	channel_manager: &ChannelManager, swaptype: &SwapType,
+	channel_manager: &ChannelManager, swaptype: &SwapType, timeout_secs: u32
 ) -> (PaymentHash, PaymentSecret) {
 	let (payment_hash, payment_secret) =
-		channel_manager.create_inbound_payment(Some(swaptype.amount_msats()), 900, None).unwrap();
+		channel_manager.create_inbound_payment(Some(swaptype.amount_msats()), timeout_secs, None).unwrap();
 	(payment_hash, payment_secret)
 }
 

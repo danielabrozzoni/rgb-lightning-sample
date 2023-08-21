@@ -615,15 +615,16 @@ send_swap() {
 }
 
 maker_init() {
-    local node amount asset side price
+    local node amount asset side price timeout
     node="$1"
     amount="$2"
     side="$3"
     price="$4"
+    timeout="$5"
 
     _tit "node $node initializating trade (mm-side): swapping ($side) $amount of $ASSET_ID at $price msats/asset"
     timestamp
-    $TMUX_CMD send-keys -t node$node "makerinit $amount $ASSET_ID $side $price" C-m
+    $TMUX_CMD send-keys -t node$node "makerinit $amount $ASSET_ID $side $price $timeout" C-m
     swap_string=$(_wait_for_text 5 node$node "SUCCESS! swap_string =" |awk '{print $NF}')
     payment_secret=$(_wait_for_text 5 node$node "payment_secret: " |awk '{print $NF}')
     _out "swap_string: $swap_string"
@@ -640,6 +641,19 @@ taker() {
     taker_pk=$(_wait_for_text 5 node$node "our_pk: " |awk '{print $NF}')
     _out "taker_pk: $taker_pk"
     sleep 1
+}
+
+taker_list() {
+    local node text trades_num text
+    node="$1"
+    trades_num="$2"
+
+    lines=$((trades_num*7))
+
+    _tit "listing whitelisted trades on node $node"
+    $TMUX_CMD send-keys -t node$node "takerlist" C-m
+    text="$(_wait_for_text 5 "node$node" "takerlist" $lines | sed -n '/^\[/,/^\]/p')"
+    echo "$text"
 }
 
 maker_execute() {

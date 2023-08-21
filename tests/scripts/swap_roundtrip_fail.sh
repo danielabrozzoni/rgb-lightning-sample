@@ -22,6 +22,6 @@ list_channels 2 2
 list_channels 1 2
 
 
-maker_init 2 10 "sell"
+maker_init 2 10 "sell" 900
 # taker 1               like `swap_roundtrip` but we don't whitelist the swap so it will fail
 maker_execute_expect_failure 2 "$NODE1_ID"
