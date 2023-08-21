@@ -34,6 +34,13 @@ impl SwapType {
 			}
 		}
 	}
+	pub fn amount_rgb(&self) -> u64 {
+		match self {
+			SwapType::BuyAsset { amount_rgb, .. } | SwapType::SellAsset { amount_rgb, .. } => {
+				*amount_rgb
+			}
+		}
+	}
 
 	pub fn side(&self) -> &'static str {
 		match self {

@@ -643,6 +643,19 @@ taker() {
     sleep 1
 }
 
+taker_list() {
+    local node text trades_num text
+    node="$1"
+    trades_num="$2"
+
+    lines=$((trades_num*7))
+
+    _tit "listing whitelisted trades on node $node"
+    $TMUX_CMD send-keys -t node$node "takerlist" C-m
+    text="$(_wait_for_text 5 "node$node" "takerlist" $lines | sed -n '/^\[/,/^\]/p')"
+    echo "$text"
+}
+
 maker_execute() {
     local node
     node="$1"

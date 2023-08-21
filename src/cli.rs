@@ -1201,6 +1201,22 @@ pub(crate) async fn poll_for_user_input(
 					println!("SUCCESS: Trade whitelisted!");
 					println!("our_pk: {}", channel_manager.get_our_node_id());
 				}
+				"takerlist" => {
+					let lock = whitelisted_trades.lock().unwrap();
+					println!("[");
+					for (k, v) in lock.iter() {
+						println!("\t{{");
+
+						println!("\t\tpayment_hash: {}", hex_utils::hex_str(&k.0));
+						println!("\t\tcontract_id: {}", v.0);
+						println!("\t\tside: {}", v.1.side());
+						println!("\t\tamount_msats: {}", v.1.amount_msats());
+						println!("\t\tamount_rgb: {}", v.1.amount_rgb());
+
+						println!("\t}},");
+					}
+					println!("]");
+				}
 				"makerexecute" => {
 					let swapstring = words.next();
 					let payment_secret = words.next();
@@ -1449,6 +1465,7 @@ fn help() {
 	println!("\n  Swaps:");
 	println!("      makerinit <amount> <asset_id> <buy|sell> <timeout> [<price_msats_per_asset>]");
 	println!("      taker <swap_string>");
+	println!("      takerlist");
 	println!("      makerexecute <payment_hash> <payment_secret> <peer_pubkey>");
 	println!("\n  Peers:");
 	println!("      connectpeer pubkey@host:port");
