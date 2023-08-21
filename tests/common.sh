@@ -615,15 +615,16 @@ send_swap() {
 }
 
 maker_init() {
-    local node amount asset side price
+    local node amount asset side price timeout
     node="$1"
     amount="$2"
     side="$3"
     price="$4"
+    timeout="$5"
 
     _tit "node $node initializating trade (mm-side): swapping ($side) $amount of $ASSET_ID at $price msats/asset"
     timestamp
-    $TMUX_CMD send-keys -t node$node "makerinit $amount $ASSET_ID $side $price" C-m
+    $TMUX_CMD send-keys -t node$node "makerinit $amount $ASSET_ID $side $price $timeout" C-m
     swap_string=$(_wait_for_text 5 node$node "SUCCESS! swap_string =" |awk '{print $NF}')
     payment_secret=$(_wait_for_text 5 node$node "payment_secret: " |awk '{print $NF}')
     _out "swap_string: $swap_string"

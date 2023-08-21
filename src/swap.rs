@@ -47,6 +47,7 @@ impl SwapType {
 pub struct SwapString {
 	pub asset_id: ContractId,
 	pub swap_type: SwapType,
+	pub expiry: u64,
 	pub payment_hash: PaymentHash,
 }
 
@@ -59,6 +60,7 @@ impl std::str::FromStr for SwapString {
 		let asset_id = iter.next();
 		let side = iter.next();
 		let price = iter.next();
+		let expiry = iter.next();
 		let payment_hash = iter.next();
 
 		if payment_hash.is_none() || iter.next().is_some() {
@@ -68,17 +70,19 @@ impl std::str::FromStr for SwapString {
 		let amount = amount.unwrap().parse::<u64>();
 		let asset_id = ContractId::from_str(asset_id.unwrap());
 		let price = price.unwrap().parse::<u64>();
+		let expiry = expiry.unwrap().parse::<u64>();
 		let payment_hash = hex_utils::to_vec(payment_hash.unwrap())
 			.and_then(|vec| vec.try_into().ok())
 			.map(|slice| PaymentHash(slice));
 
-		if amount.is_err() || asset_id.is_err() || price.is_err() || payment_hash.is_none() {
+		if amount.is_err() || asset_id.is_err() || price.is_err() || expiry.is_err() || payment_hash.is_none() {
 			return Err("Unable to parse parts");
 		}
 
 		let amount = amount.unwrap();
 		let asset_id = asset_id.unwrap();
 		let price = price.unwrap();
+		let expiry = expiry.unwrap();
 		let payment_hash = payment_hash.unwrap();
 
 		let swap_type = match side {
@@ -91,6 +95,10 @@ impl std::str::FromStr for SwapString {
 			}
 		};
 
-		Ok(SwapString { asset_id, swap_type, payment_hash })
+		Ok(SwapString { asset_id, swap_type, expiry, payment_hash })
 	}
+}
+
+pub fn get_current_timestamp() -> u64 {
+	std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
 }

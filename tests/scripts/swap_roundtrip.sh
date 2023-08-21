@@ -22,7 +22,7 @@ list_channels 2 2
 list_channels 1 2
 
 
-maker_init 2 10 "sell"
+maker_init 2 10 "sell" 900
 taker 1
 maker_execute 2
 
