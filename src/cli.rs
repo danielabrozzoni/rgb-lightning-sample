@@ -1189,6 +1189,11 @@ pub(crate) async fn poll_for_user_input(
 						}
 					};
 
+					if get_current_timestamp() > swapstring.expiry {
+						println!("ERROR: the swap offer has already expired");
+						continue;
+					}
+
 					whitelisted_trades.lock().unwrap().insert(
 						swapstring.payment_hash,
 						(swapstring.asset_id, swapstring.swap_type),
@@ -1447,7 +1452,7 @@ fn help() {
 	println!("\n  Routing:");
 	println!("      getroute <dest_pubkey> <amt> [<asset_id>]");
 	println!("\n  Swaps:");
-	println!("      makerinit <amount> <asset_id> <buy|sell> <timeout> [<price_msats_per_asset>]");
+	println!("      makerinit <amount> <asset_id> <buy|sell> <expiry_secs> [<price_msats_per_asset>]");
 	println!("      taker <swap_string>");
 	println!("      makerexecute <payment_hash> <payment_secret> <peer_pubkey>");
 	println!("\n  Peers:");

@@ -643,6 +643,16 @@ taker() {
     sleep 1
 }
 
+taker_expect_timeout() {
+    local node
+    node="$1"
+
+    _tit "node $node taking the trade $swap_string"
+    $TMUX_CMD send-keys -t node$node "taker $swap_string" C-m
+    _wait_for_text_multi $T_1 node$node "taker" "ERROR: the swap offer has already expired"
+    timestamp
+}
+
 maker_execute() {
     local node
     node="$1"
