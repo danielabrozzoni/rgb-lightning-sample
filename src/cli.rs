@@ -83,7 +83,7 @@ const OPENCHANNEL_MAX_SAT: u64 = 16777215;
 
 const DUST_LIMIT_MSAT: u64 = 546000;
 
-const HTLC_MIN_MSAT: u64 = 3000000;
+pub(crate) const HTLC_MIN_MSAT: u64 = 3000000;
 
 const INVOICE_MIN_MSAT: u64 = HTLC_MIN_MSAT;
 
@@ -132,6 +132,7 @@ pub(crate) async fn poll_for_user_input(
 	bitcoind_client: Arc<BitcoindClient>, proxy_client: Arc<RestClient>, proxy_url: &str,
 	proxy_endpoint: &str, wallet_arc: Arc<Mutex<Wallet<SqliteDatabase>>>, electrum_url: String,
 	whitelisted_trades: Arc<Mutex<HashMap<PaymentHash, (ContractId, SwapType)>>>,
+	maker_trades: Arc<Mutex<HashMap<PaymentHash, (ContractId, SwapType)>>>,
 ) {
 	println!(
 		"LDK startup successful. Enter \"help\" to view available commands. Press Ctrl-D to quit."
@@ -1154,7 +1155,7 @@ pub(crate) async fn poll_for_user_input(
 					};
 
 					let (payment_hash, payment_secret) =
-						maker_init(&channel_manager, &swaptype, timeout);
+						maker_init(&channel_manager, &swaptype, timeout, asset_id, &maker_trades);
 					let expiry = get_current_timestamp() + timeout as u64;
 					let swapstring = format!(
 						"{}:{}:{}:{}:{}:{}",
@@ -1202,21 +1203,41 @@ pub(crate) async fn poll_for_user_input(
 					println!("SUCCESS: Trade whitelisted!");
 					println!("our_pk: {}", channel_manager.get_our_node_id());
 				}
-				"takerlist" => {
-					let lock = whitelisted_trades.lock().unwrap();
-					println!("[");
-					for (k, v) in lock.iter() {
-						println!("\t{{");
+				"tradeslist" => {
+					let filter = words.next();
 
-						println!("\t\tpayment_hash: {}", hex_utils::hex_str(&k.0));
-						println!("\t\tcontract_id: {}", v.0);
-						println!("\t\tside: {}", v.1.side());
-						println!("\t\tamount_msats: {}", v.1.amount_msats());
-						println!("\t\tamount_rgb: {}", v.1.amount_rgb());
+					let print_trade = |(k, v): (&PaymentHash, &(ContractId, SwapType))| {
+						println!("\t\t{{");
 
-						println!("\t}},");
+						println!("\t\t\tpayment_hash: {}", hex_utils::hex_str(&k.0));
+						println!("\t\t\tcontract_id: {}", v.0);
+						println!("\t\t\tside: {}", v.1.side());
+						println!("\t\t\tamount_msats: {}", v.1.amount_msats());
+						println!("\t\t\tamount_rgb: {}", v.1.amount_rgb());
+
+						println!("\t\t}},");
+					};
+
+					println!("{{");
+					if filter.is_none() || filter == Some("taker") {
+						let lock = whitelisted_trades.lock().unwrap();
+
+						println!("\ttaker: [");
+						for tuple in lock.iter() {
+							print_trade(tuple);
+						}
+						println!("\t],");
 					}
-					println!("]");
+					if filter.is_none() || filter == Some("maker") {
+						let lock = maker_trades.lock().unwrap();
+
+						println!("\tmaker: [");
+						for tuple in lock.iter() {
+							print_trade(tuple);
+						}
+						println!("\t],");
+					}
+					println!("}}");
 				}
 				"makerexecute" => {
 					let swapstring = words.next();
@@ -1473,7 +1494,7 @@ fn help() {
 		"      makerinit <amount> <asset_id> <buy|sell> <expiry_secs> [<price_msats_per_asset>]"
 	);
 	println!("      taker <swap_string>");
-	println!("      takerlist");
+	println!("      tradeslist [<taker|maker>]");
 	println!("      makerexecute <payment_hash> <payment_secret> <peer_pubkey>");
 	println!("\n  Peers:");
 	println!("      connectpeer pubkey@host:port");
@@ -1665,6 +1686,8 @@ fn get_route(
 		previously_failed_channels: vec![],
 		final_cltv_expiry_delta: 14,
 	};
+	// let usable_channels = channel_manager.list_usable_channels();
+	// let usable_channels = usable_channels.iter().collect::<Vec<_>>();
 	let route = router.find_route(
 		&start,
 		&RouteParameters {
@@ -1681,10 +1704,14 @@ fn get_route(
 
 fn maker_init(
 	channel_manager: &ChannelManager, swaptype: &SwapType, timeout_secs: u32,
+	contract_id: ContractId,
+	maker_trades: &Arc<Mutex<HashMap<PaymentHash, (ContractId, SwapType)>>>,
 ) -> (PaymentHash, PaymentSecret) {
 	let (payment_hash, payment_secret) = channel_manager
 		.create_inbound_payment(Some(swaptype.amount_msats()), timeout_secs, None)
 		.unwrap();
+	maker_trades.lock().unwrap().insert(payment_hash, (contract_id, *swaptype));
+
 	(payment_hash, payment_secret)
 }
 
@@ -1737,7 +1764,7 @@ fn maker_execute(
 	second_leg.paths[0].hops[0].short_channel_id |= 0x80000000_00000000;
 	if let SwapType::BuyAsset { .. } = swaptype {
 		// Generally in the last hop the fee_amount is set to the payment amount, so we set it
-		// to 546 sats (the payment amount for rgb payments)
+		// to HTLC_MIN_MSAT to cover the fees for the next RGB hop.
 		first_leg.paths[0].hops.last_mut().expect("Path not to be empty").fee_msat = HTLC_MIN_MSAT;
 	}
 
@@ -1749,6 +1776,7 @@ fn maker_execute(
 			if let SwapType::SellAsset { amount_rgb, .. } = swaptype {
 				hop.rgb_amount = Some(amount_rgb);
 				hop.payment_amount = HTLC_MIN_MSAT;
+				hop.fee_msat = 0;
 			}
 			hop
 		})
@@ -1756,6 +1784,7 @@ fn maker_execute(
 			if let SwapType::BuyAsset { amount_rgb, .. } = swaptype {
 				hop.rgb_amount = Some(amount_rgb);
 				hop.payment_amount = HTLC_MIN_MSAT;
+				hop.fee_msat = 0;
 			}
 			hop
 		}))
